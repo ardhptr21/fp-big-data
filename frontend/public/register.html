@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Daftarkan Wilayah Baru — SlumMap Surabaya</title>
+  <meta name="description" content="Form pendaftaran wilayah RT/RW baru ke sistem master wilayah Surabaya.">
+
+  <!-- Leaflet for mini map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    .register-page {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+    }
+
+    #mini-map {
+      height: 300px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-primary);
+    }
+
+    .form-grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+    }
+
+    @media (max-width: 768px) {
+      .form-grid-3 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="/" class="nav-brand">
+    <div class="nav-brand-icon">🗺️</div>
+    <span>SlumMap Surabaya</span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="/">🗺️ Peta Utama</a></li>
+    <li><a href="/input.html">📝 Input Data</a></li>
+    <li><a href="/prioritas.html">🚨 Prioritas</a></li>
+    <li><a href="/register.html" class="active">➕ Wilayah Baru</a></li>
+  </ul>
+</nav>
+
+<div class="page">
+  <div class="register-page">
+
+    <div class="page-header">
+      <h1 class="page-title">➕ Daftarkan Wilayah Baru</h1>
+      <p class="page-subtitle">Daftarkan RT/RW baru ke master wilayah sebelum memasukkan data survei. Satu kali daftarkan, tidak perlu diulang.</p>
+    </div>
+
+    <form id="register-form" autocomplete="off">
+
+      <!-- Identitas Wilayah -->
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-header">
+          <span class="card-title">1. Identitas Wilayah</span>
+        </div>
+        <div class="card-body">
+          <div class="form-grid" style="gap:1rem;margin-bottom:1rem;">
+            <div class="form-group">
+              <label class="form-label" for="kecamatan">Kecamatan <span>*</span></label>
+              <input type="text" class="form-control" id="kecamatan" required placeholder="Contoh: Tambaksari">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="kelurahan">Kelurahan <span>*</span></label>
+              <input type="text" class="form-control" id="kelurahan" required placeholder="Contoh: Gading">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="rw">RW <span>*</span></label>
+              <input type="text" class="form-control" id="rw" required placeholder="Contoh: 01" maxlength="4">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="rt">RT <span>*</span></label>
+              <input type="text" class="form-control" id="rt" required placeholder="Contoh: 001" maxlength="4">
+            </div>
+          </div>
+
+          <!-- ID Preview -->
+          <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:0.75rem;font-size:0.8125rem;">
+            <span style="color:var(--text-muted);">ID Wilayah yang akan dibuat: </span>
+            <span id="id-preview" style="font-family:monospace;color:var(--accent-teal);">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Demografi -->
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-header">
+          <span class="card-title">2. Data Demografi</span>
+        </div>
+        <div class="card-body">
+          <div class="form-grid-3">
+            <div class="form-group">
+              <label class="form-label" for="total_kk">Estimasi KK</label>
+              <input type="number" class="form-control" id="total_kk" min="0" value="0">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="total_jiwa">Estimasi Jiwa</label>
+              <input type="number" class="form-control" id="total_jiwa" min="0" value="0">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="luas_m2">Luas (m²)</label>
+              <input type="number" class="form-control" id="luas_m2" min="0" step="0.1" value="0">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Geometry -->
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-header">
+          <span class="card-title">3. Koordinat / Geometri</span>
+          <span style="font-size:0.75rem;color:var(--text-muted);">Klik peta atau paste GeoJSON</span>
+        </div>
+        <div class="card-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">
+            <!-- Mini Map -->
+            <div>
+              <div class="form-label" style="margin-bottom:0.5rem;">Klik peta untuk set titik lokasi</div>
+              <div id="mini-map"></div>
+              <div id="map-coords" style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem;">
+                Klik pada peta untuk menandai lokasi RT/RW
+              </div>
+            </div>
+            <!-- GeoJSON Input -->
+            <div>
+              <div class="form-label" style="margin-bottom:0.5rem;">Atau paste GeoJSON Polygon</div>
+              <textarea class="form-control" id="geometry_wkt" rows="10"
+                placeholder='{"type":"Polygon","coordinates":[[[112.752, -7.245],[112.756, -7.245],[112.756, -7.248],[112.752, -7.248],[112.752, -7.245]]]}'
+                style="font-family:monospace;font-size:0.75rem;"></textarea>
+              <div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem;">
+                Format: GeoJSON <code>Polygon</code> atau <code>Point</code>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Submit -->
+      <div style="display:flex;gap:1rem;align-items:center;">
+        <button type="submit" class="btn btn-primary" id="register-btn" style="padding:0.75rem 2rem;">
+          💾 Daftarkan Wilayah
+        </button>
+        <button type="reset" class="btn btn-secondary" onclick="resetForm()">↩️ Reset</button>
+        <a href="/" class="btn btn-secondary">🗺️ Kembali ke Peta</a>
+      </div>
+
+      <div id="register-result" style="margin-top:1.5rem;"></div>
+
+    </form>
+
+    <!-- Existing Wilayah List -->
+    <div style="margin-top:2rem;">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">📋 Wilayah Terdaftar</span>
+          <span id="wilayah-count" style="font-size:0.75rem;color:var(--text-muted);"></span>
+        </div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>ID Wilayah</th>
+                <th>RT/RW</th>
+                <th>Kelurahan</th>
+                <th>Kecamatan</th>
+                <th>KK</th>
+                <th>Jiwa</th>
+                <th>Aksi</th>
+              </tr>
+            </thead>
+            <tbody id="wilayah-list-body">
+              <tr><td colspan="7"><div class="loading-spinner"><div class="spinner"></div>Memuat...</div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+const API_BASE = '/api';
+
+// ====== Mini Map ======
+const miniMap = L.map('mini-map').setView([-7.2575, 112.7521], 12);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  attribution: '© CARTO', subdomains: 'abcd'
+}).addTo(miniMap);
+
+let marker = null;
+miniMap.on('click', (e) => {
+  const {lat, lng} = e.latlng;
+  if (marker) marker.remove();
+  marker = L.marker([lat, lng]).addTo(miniMap);
+
+  // Auto-fill geometry as a point
+  const geojson = JSON.stringify({
+    type: "Point",
+    coordinates: [lng, lat]
+  });
+  document.getElementById('geometry_wkt').value = geojson;
+  document.getElementById('map-coords').textContent = `Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+});
+
+// ====== ID Preview ======
+function buildId() {
+  const kec = (document.getElementById('kecamatan').value || '').toUpperCase().replace(/\s+/g, '-').slice(0, 5);
+  const kel = (document.getElementById('kelurahan').value || '').toUpperCase().replace(/\s+/g, '-').slice(0, 5);
+  const rw = document.getElementById('rw').value.padStart(2, '0');
+  const rt = document.getElementById('rt').value.padStart(3, '0');
+  if (!kec || !kel || !rw || !rt) return '—';
+  return `SBY-${kec}-${kel}-${rw}-${rt}`;
+}
+
+['kecamatan','kelurahan','rw','rt'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', () => {
+    document.getElementById('id-preview').textContent = buildId();
+  });
+});
+
+// ====== Submit ======
+document.getElementById('register-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = buildId();
+  if (id === '—') {
+    showToast('warning', 'Isi semua field wilayah', '');
+    return;
+  }
+
+  const payload = {
+    id_wilayah: id,
+    kota: 'Surabaya',
+    kecamatan: document.getElementById('kecamatan').value,
+    kelurahan: document.getElementById('kelurahan').value,
+    rw: document.getElementById('rw').value,
+    rt: document.getElementById('rt').value,
+    total_kk: parseInt(document.getElementById('total_kk').value || 0),
+    total_jiwa: parseInt(document.getElementById('total_jiwa').value || 0),
+    luas_m2: parseFloat(document.getElementById('luas_m2').value || 0),
+    geometry_wkt: document.getElementById('geometry_wkt').value || null,
+  };
+
+  const btn = document.getElementById('register-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Mendaftarkan...';
+
+  try {
+    const res = await fetch(`${API_BASE}/wilayah`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (res.ok || res.status === 201) {
+      showToast('success', 'Wilayah berhasil didaftarkan!', `ID: ${id}`);
+      document.getElementById('register-result').innerHTML = `
+        <div style="background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);border-radius:10px;padding:1rem;display:flex;align-items:center;gap:0.75rem;">
+          <span style="font-size:1.5rem;">✅</span>
+          <div>
+            <div style="font-weight:600;color:var(--text-primary);">Wilayah berhasil didaftarkan!</div>
+            <div style="font-size:0.8125rem;color:var(--text-secondary);">ID: <code style="color:var(--accent-teal);">${id}</code></div>
+          </div>
+          <a href="/input.html" class="btn btn-primary btn-sm" style="margin-left:auto;">📝 Input Data</a>
+        </div>
+      `;
+      loadWilayahList();
+    } else if (res.status === 409) {
+      showToast('warning', 'Wilayah sudah terdaftar', `ID ${id} sudah ada di sistem.`);
+    } else {
+      throw new Error(data.detail || 'Error');
+    }
+  } catch (err) {
+    showToast('error', 'Gagal mendaftarkan', err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '💾 Daftarkan Wilayah';
+  }
+});
+
+// ====== Load existing ======
+async function loadWilayahList() {
+  try {
+    const res = await fetch(`${API_BASE}/wilayah`);
+    const data = await res.json();
+    const list = data.wilayah || [];
+    document.getElementById('wilayah-count').textContent = `${list.length} wilayah terdaftar`;
+    const tbody = document.getElementById('wilayah-list-body');
+    if (list.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">🏘️</div><div class="empty-title">Belum ada wilayah terdaftar</div></div></td></tr>`;
+      return;
+    }
+    tbody.innerHTML = list.map(w => `
+      <tr>
+        <td style="font-family:monospace;font-size:0.75rem;">${w.id_wilayah}</td>
+        <td>RT ${w.rt} / RW ${w.rw}</td>
+        <td class="td-primary">${w.kelurahan}</td>
+        <td>${w.kecamatan}</td>
+        <td>${(w.total_kk||0).toLocaleString()}</td>
+        <td>${(w.total_jiwa||0).toLocaleString()}</td>
+        <td>
+          <a href="/wilayah.html?id=${encodeURIComponent(w.id_wilayah)}" class="btn btn-secondary btn-sm">📊 Riwayat</a>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function resetForm() {
+  document.getElementById('id-preview').textContent = '—';
+  document.getElementById('register-result').innerHTML = '';
+  if (marker) { marker.remove(); marker = null; }
+  document.getElementById('map-coords').textContent = 'Klik pada peta untuk menandai lokasi RT/RW';
+}
+
+function showToast(type, title, msg, duration = 4000) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const icons = {success:'✅',error:'❌',info:'ℹ️',warning:'⚠️'};
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span class="toast-icon">${icons[type]||'ℹ️'}</span><div class="toast-content"><div class="toast-title">${title}</div>${msg?`<div class="toast-msg">${msg}</div>`:''}</div>`;
+  container.appendChild(toast);
+  setTimeout(() => { toast.style.opacity='0'; toast.style.transition='all 0.3s'; setTimeout(()=>toast.remove(),300); }, duration);
+}
+
+document.addEventListener('DOMContentLoaded', loadWilayahList);
+</script>
+</body>
+</html>

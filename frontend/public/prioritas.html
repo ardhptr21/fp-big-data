@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prioritas Intervensi — SlumMap Surabaya</title>
+  <meta name="description" content="Ranking prioritas intervensi penanganan permukiman kumuh berdasarkan risk score dan jiwa terdampak.">
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    .priority-page {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+    }
+
+    .rank-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      font-weight: 800;
+      font-size: 0.875rem;
+    }
+
+    .rank-1 { background: linear-gradient(135deg, #f59e0b, #fbbf24); color: #000; }
+    .rank-2 { background: linear-gradient(135deg, #94a3b8, #cbd5e1); color: #000; }
+    .rank-3 { background: linear-gradient(135deg, #cd7c2c, #d97706); color: #fff; }
+    .rank-other { background: var(--bg-primary); color: var(--text-muted); border: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="/" class="nav-brand">
+    <div class="nav-brand-icon">🗺️</div>
+    <span>SlumMap Surabaya</span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="/">🗺️ Peta Utama</a></li>
+    <li><a href="/input.html">📝 Input Data</a></li>
+    <li><a href="/prioritas.html" class="active">🚨 Prioritas</a></li>
+    <li><a href="/register.html">➕ Wilayah Baru</a></li>
+  </ul>
+</nav>
+
+<div class="page">
+  <div class="priority-page">
+
+    <div class="page-header">
+      <h1 class="page-title">🚨 Prioritas Intervensi</h1>
+      <p class="page-subtitle">Ranking berdasarkan skor risiko × jiwa terdampak. Data diperbarui setiap kali ada survei baru.</p>
+    </div>
+
+    <!-- Summary Stats -->
+    <div class="stat-grid" style="margin-bottom:1.5rem;">
+      <div class="stat-card danger">
+        <div class="stat-label">Total Kumuh</div>
+        <div class="stat-value" id="stat-kumuh">—</div>
+        <div class="stat-sub">wilayah teridentifikasi</div>
+      </div>
+      <div class="stat-card warning">
+        <div class="stat-label">Jiwa Terdampak</div>
+        <div class="stat-value" id="stat-jiwa">—</div>
+        <div class="stat-sub">total jiwa di wilayah kumuh</div>
+      </div>
+      <div class="stat-card info">
+        <div class="stat-label">Avg Risk Score</div>
+        <div class="stat-value" id="stat-avg-risk">—</div>
+        <div class="stat-sub">rata-rata seluruh wilayah</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Survey Events</div>
+        <div class="stat-value" id="stat-events">—</div>
+        <div class="stat-sub">data survei teringest</div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="card" style="margin-bottom:1.5rem;">
+      <div class="card-header">
+        <span class="card-title">📊 Top 10 Wilayah Risiko Tertinggi</span>
+      </div>
+      <div class="card-body">
+        <div class="chart-container" style="height:300px;">
+          <canvas id="priority-chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filter -->
+    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap;">
+      <div class="form-group" style="flex:1;max-width:200px;margin:0;">
+        <select class="form-control" id="filter-kecamatan" style="font-size:0.8125rem;">
+          <option value="">Semua Kecamatan</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:1;max-width:200px;margin:0;">
+        <select class="form-control" id="filter-level" style="font-size:0.8125rem;">
+          <option value="">Semua Level Risiko</option>
+          <option value="Sangat Berat">Sangat Berat</option>
+          <option value="Berat">Berat</option>
+          <option value="Sedang">Sedang</option>
+          <option value="Ringan">Ringan</option>
+        </select>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="exportCSV()">📥 Export CSV</button>
+    </div>
+
+    <!-- Priority Table -->
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">📋 Daftar Prioritas Intervensi</span>
+        <span id="table-count" style="font-size:0.75rem;color:var(--text-muted);"></span>
+      </div>
+      <div class="table-container">
+        <table id="priority-table">
+          <thead>
+            <tr>
+              <th>Rank</th>
+              <th>ID Wilayah</th>
+              <th>Kelurahan</th>
+              <th>Kecamatan</th>
+              <th>Risk Score</th>
+              <th>Risk Level</th>
+              <th>Prob. Kumuh</th>
+              <th>Jiwa</th>
+              <th>Faktor Utama</th>
+              <th>Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="priority-tbody">
+            <tr>
+              <td colspan="10">
+                <div class="loading-spinner">
+                  <div class="spinner"></div> Memuat data...
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/js/charts.js"></script>
+<script>
+const API_BASE = '/api';
+let allData = [];
+let filteredData = [];
+
+function getBadgeClass(level) {
+  const m = {'Ringan':'badge-ringan','Sedang':'badge-sedang','Berat':'badge-berat','Sangat Berat':'badge-sangat-berat'};
+  return m[level] || 'badge-none';
+}
+
+function getRankBadge(rank) {
+  if (rank === 1) return `<span class="rank-badge rank-1">1</span>`;
+  if (rank === 2) return `<span class="rank-badge rank-2">2</span>`;
+  if (rank === 3) return `<span class="rank-badge rank-3">3</span>`;
+  return `<span class="rank-badge rank-other">${rank}</span>`;
+}
+
+async function loadPriority() {
+  try {
+    const [prioRes, sumRes] = await Promise.all([
+      fetch(`${API_BASE}/priority`),
+      fetch(`${API_BASE}/summary`),
+    ]);
+
+    const prioData = await prioRes.json();
+    const sumData = sumRes.ok ? await sumRes.json() : {};
+
+    allData = prioData.priority || [];
+    filteredData = [...allData];
+
+    // Stats
+    const setEl = (id, v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
+    setEl('stat-kumuh', (sumData.total_kumuh || 0).toLocaleString('id-ID'));
+    setEl('stat-jiwa', (sumData.total_jiwa_terdampak || 0).toLocaleString('id-ID'));
+    setEl('stat-events', (sumData.total_survey_events || 0).toLocaleString('id-ID'));
+
+    if (allData.length > 0) {
+      const avg = allData.reduce((s,r) => s + parseFloat(r.risk_score||0), 0) / allData.length;
+      setEl('stat-avg-risk', avg.toFixed(1));
+    }
+
+    // Populate kecamatan filter
+    const kecs = [...new Set(allData.map(r => r.kecamatan).filter(Boolean))].sort();
+    const sel = document.getElementById('filter-kecamatan');
+    kecs.forEach(k => {
+      const opt = document.createElement('option');
+      opt.value = k; opt.textContent = k;
+      sel.appendChild(opt);
+    });
+
+    renderTable();
+    renderChart();
+
+  } catch (e) {
+    console.error(e);
+    document.getElementById('priority-tbody').innerHTML =
+      `<tr><td colspan="10" style="text-align:center;color:var(--text-muted);">Gagal memuat data: ${e.message}</td></tr>`;
+  }
+}
+
+function renderTable() {
+  const tbody = document.getElementById('priority-tbody');
+  const kec = document.getElementById('filter-kecamatan').value;
+  const lvl = document.getElementById('filter-level').value;
+
+  filteredData = allData.filter(r => {
+    if (kec && r.kecamatan !== kec) return false;
+    if (lvl && r.risk_level !== lvl) return false;
+    return true;
+  });
+
+  document.getElementById('table-count').textContent = `${filteredData.length} wilayah`;
+
+  if (filteredData.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10"><div class="empty-state"><div class="empty-icon">🔍</div><div class="empty-title">Tidak ada data</div><div class="empty-msg">Belum ada data atau filter tidak menemukan hasil.</div></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filteredData.map((r, i) => {
+    const rank = r.prioritas_rank || (i + 1);
+    const score = parseFloat(r.risk_score || 0).toFixed(1);
+    const proba = r.proba_kumuh != null ? `${(r.proba_kumuh * 100).toFixed(1)}%` : '—';
+    const jiwa = (r.jiwa_terdampak || 0).toLocaleString('id-ID');
+    const level = r.risk_level || 'Belum Didata';
+    const factors = [r.top_faktor_1, r.top_faktor_2, r.top_faktor_3].filter(Boolean).join(', ') || '—';
+
+    return `
+      <tr>
+        <td>${getRankBadge(rank)}</td>
+        <td style="font-family:monospace;font-size:0.75rem;">${r.id_wilayah || '—'}</td>
+        <td class="td-primary">${r.kelurahan || '—'}</td>
+        <td>${r.kecamatan || '—'}</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:0.5rem;">
+            <span class="td-primary" style="font-weight:700;">${score}</span>
+            <div class="risk-bar-container" style="width:60px;">
+              <div class="risk-bar ${getRiskBarClass(level)}" style="width:${Math.min(parseFloat(score),100)}%;"></div>
+            </div>
+          </div>
+        </td>
+        <td><span class="badge ${getBadgeClass(level)}">${level}</span></td>
+        <td>${proba}</td>
+        <td>${jiwa}</td>
+        <td style="font-size:0.75rem;color:var(--text-secondary);max-width:200px;">${factors}</td>
+        <td>
+          <a href="/wilayah.html?id=${encodeURIComponent(r.id_wilayah || '')}" class="btn btn-secondary btn-sm">📊 Detail</a>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function getRiskBarClass(level) {
+  const m = {'Ringan':'ringan','Sedang':'sedang','Berat':'berat','Sangat Berat':'sangat-berat'};
+  return m[level] || 'none';
+}
+
+function renderChart() {
+  if (typeof createPriorityChart === 'function' && allData.length > 0) {
+    createPriorityChart('priority-chart', allData);
+  }
+}
+
+function exportCSV() {
+  if (filteredData.length === 0) return;
+  const headers = ['Rank','ID Wilayah','Kelurahan','Kecamatan','Risk Score','Risk Level','Prob Kumuh','Jiwa','Faktor 1','Faktor 2','Faktor 3'];
+  const rows = filteredData.map(r => [
+    r.prioritas_rank||'',r.id_wilayah||'',r.kelurahan||'',r.kecamatan||'',
+    parseFloat(r.risk_score||0).toFixed(1),r.risk_level||'',
+    r.proba_kumuh!=null?(r.proba_kumuh*100).toFixed(1)+'%':'',
+    r.jiwa_terdampak||0,r.top_faktor_1||'',r.top_faktor_2||'',r.top_faktor_3||''
+  ]);
+  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `prioritas-intervensi-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+}
+
+document.getElementById('filter-kecamatan').addEventListener('change', renderTable);
+document.getElementById('filter-level').addEventListener('change', renderTable);
+document.addEventListener('DOMContentLoaded', loadPriority);
+</script>
+</body>
+</html>

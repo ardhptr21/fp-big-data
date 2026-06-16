@@ -1,0 +1,223 @@
+
+services:
+
+  # ==========================================
+  # HADOOP HDFS
+  # ==========================================
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    hostname: namenode
+    container_name: slum_namenode
+    user: root
+    environment:
+      CLUSTER_NAME: slum-cluster
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      HDFS_CONF_dfs_replication: 1
+      HDFS_CONF_dfs_permissions___enabled: "false"
+      HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check: "false"
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+      - ./init_scripts:/init_scripts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9870 || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 90s
+    networks:
+      - slum_net
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    hostname: datanode
+    container_name: slum_datanode
+    user: root
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      HDFS_CONF_dfs_replication: 1
+      HDFS_CONF_dfs_permissions___enabled: "false"
+      HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check: "false"
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - slum_net
+
+  # ==========================================
+  # KAFKA (KRaft mode — no ZooKeeper needed)
+  # ==========================================
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: slum_kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: "168"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 60s
+    networks:
+      - slum_net
+
+  # ==========================================
+  # APACHE SPARK (official image)
+  # ==========================================
+  spark:
+    image: apache/spark:3.5.0
+    container_name: slum_spark_master
+    hostname: spark
+    user: root
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+      - spark_data:/tmp/spark-events
+    networks:
+      - slum_net
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: slum_spark_worker
+    user: root
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark:7077"]
+    environment:
+      SPARK_WORKER_MEMORY: "2g"
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_WEBUI_PORT: "8081"
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+    depends_on:
+      - spark
+
+    networks:
+      - slum_net
+
+  # ==========================================
+  # KAFKA CONSUMER
+  # ==========================================
+  consumer:
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    container_name: slum_consumer
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - KAFKA_TOPIC_SURVEY=survey-events
+      - KAFKA_TOPIC_SECONDARY=secondary-batch
+      - HDFS_URL=hdfs://namenode:9000
+      - API_URL=http://api:8000
+      - SPARK_MASTER=spark://spark:7077
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+    depends_on:
+      kafka:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - slum_net
+
+  # ==========================================
+  # FASTAPI BACKEND
+  # ==========================================
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: slum_api
+    ports:
+      - "8000:8000"
+    environment:
+      - HDFS_URL=hdfs://namenode:9000
+      - KAFKA_BOOTSTRAP=kafka:9092
+      - KAFKA_TOPIC_SURVEY=survey-events
+      - KAFKA_TOPIC_SECONDARY=secondary-batch
+      - SPARK_MASTER=spark://spark:7077
+      - SPARK_JOBS_PATH=/opt/spark_jobs
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+      - ./init_scripts:/init_scripts
+    depends_on:
+      kafka:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    restart: on-failure
+    networks:
+      - slum_net
+
+  # ==========================================
+  # FRONTEND (Nginx)
+  # ==========================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: slum_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    networks:
+      - slum_net
+
+  # ==========================================
+  # HDFS INIT JOB (run once)
+  # ==========================================
+  hdfs-init:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: slum_hdfs_init
+    user: root
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    entrypoint: ["/bin/bash", "/init_scripts/init_hdfs.sh"]
+    volumes:
+      - ./init_scripts:/init_scripts
+    depends_on:
+      namenode:
+        condition: service_healthy
+      datanode:
+        condition: service_started
+    restart: "no"
+    networks:
+      - slum_net
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
+  kafka_data:
+  spark_data:
+
+networks:
+  slum_net:
+    driver: bridge

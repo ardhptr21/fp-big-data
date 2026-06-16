@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Peta Kumuh Surabaya — Geospatial Big Data Analytics</title>
+  <meta name="description" content="Sistem pemetaan permukiman kumuh Kota Surabaya berbasis Geospatial Big Data Analytics dengan visualisasi real-time.">
+
+  <!-- Leaflet.js -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Design System -->
+  <link rel="stylesheet" href="/css/style.css">
+
+  <style>
+    body { margin: 0; overflow: hidden; }
+    .map-page { height: calc(100vh - 64px); }
+
+    #map-loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      display: none;
+      align-items: center;
+      gap: 0.75rem;
+      background: var(--bg-glass);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.5rem;
+      z-index: 1000;
+      color: var(--text-primary);
+      font-size: 0.875rem;
+    }
+
+    #processing-indicator {
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.75rem;
+      color: var(--accent-teal);
+    }
+
+    .layer-item:hover {
+      background: rgba(99, 115, 160, 0.08) !important;
+    }
+
+    .stats-mini {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+    }
+
+    .stat-mini-card {
+      background: var(--bg-primary);
+      border-radius: 8px;
+      padding: 0.625rem 0.75rem;
+    }
+
+    .stat-mini-label {
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .stat-mini-value {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      line-height: 1.2;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav class="nav">
+  <a href="/" class="nav-brand">
+    <div class="nav-brand-icon">🗺️</div>
+    <span>SlumMap Surabaya</span>
+  </a>
+
+  <ul class="nav-links">
+    <li><a href="/" class="active" id="nav-map">🗺️ Peta Utama</a></li>
+    <li><a href="/input.html" id="nav-input">📝 Input Data</a></li>
+    <li><a href="/prioritas.html" id="nav-prioritas">🚨 Prioritas</a></li>
+    <li><a href="/register.html" id="nav-register">➕ Wilayah Baru</a></li>
+  </ul>
+
+  <div class="nav-status">
+    <div id="processing-indicator">
+      <div class="spinner" style="width:12px;height:12px;border-color:rgba(20,184,166,0.3);border-top-color:var(--accent-teal);"></div>
+      <span>Processing...</span>
+    </div>
+    <div class="status-dot" id="sse-status-dot"></div>
+    <span id="sse-status-label">Connecting...</span>
+  </div>
+</nav>
+
+<!-- Map Page -->
+<div class="map-page" style="display:flex;">
+
+  <!-- Sidebar -->
+  <div class="map-sidebar">
+
+    <!-- Summary Stats -->
+    <div class="map-sidebar-section">
+      <div class="sidebar-title">Ringkasan</div>
+      <div class="stats-mini">
+        <div class="stat-mini-card">
+          <div class="stat-mini-label">Wilayah</div>
+          <div class="stat-mini-value" id="stat-total-wilayah">—</div>
+        </div>
+        <div class="stat-mini-card" style="--accent:var(--risk-sangat-berat);">
+          <div class="stat-mini-label">Kumuh</div>
+          <div class="stat-mini-value" style="color:var(--risk-sangat-berat);" id="stat-total-kumuh">—</div>
+        </div>
+        <div class="stat-mini-card">
+          <div class="stat-mini-label">Jiwa Terdampak</div>
+          <div class="stat-mini-value" id="stat-jiwa">—</div>
+        </div>
+        <div class="stat-mini-card">
+          <div class="stat-mini-label">Survey Events</div>
+          <div class="stat-mini-value" style="color:var(--accent-teal);" id="stat-events">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Layer Toggle -->
+    <div class="map-sidebar-section">
+      <div class="sidebar-title">Layer Peta</div>
+      <div class="toggle-group">
+        <button class="toggle-btn active" data-layer="risk">Risk Score</button>
+        <button class="toggle-btn" data-layer="prediction">Prediksi</button>
+      </div>
+    </div>
+
+    <!-- Map Style -->
+    <div class="map-sidebar-section">
+      <div class="sidebar-title">Gaya Peta</div>
+      <div style="display:flex;gap:0.5rem;">
+        <button id="btn-tile-dark" class="btn btn-secondary btn-sm" style="flex:1;">🌙 Gelap</button>
+        <button id="btn-tile-satellite" class="btn btn-secondary btn-sm" style="flex:1;">🛰️ Satelit</button>
+      </div>
+    </div>
+
+    <!-- Legend -->
+    <div class="map-sidebar-section">
+      <div class="sidebar-title">Legenda Risiko</div>
+      <div class="legend">
+        <div class="legend-item">
+          <div class="legend-color" style="background:#22c55e;"></div>
+          <span>Ringan (0–25)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background:#eab308;"></div>
+          <span>Sedang (25–50)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background:#f97316;"></div>
+          <span>Berat (50–75)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background:#ef4444;"></div>
+          <span>Sangat Berat (75–100)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background:#475569;"></div>
+          <span>Belum Didata</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Wilayah List -->
+    <div class="map-sidebar-section" style="flex:1;">
+      <div class="sidebar-title">Ranking Risiko</div>
+      <div id="layer-list">
+        <div class="loading-spinner">
+          <div class="spinner"></div>
+          Memuat data...
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Link -->
+    <div class="map-sidebar-section">
+      <a href="/input.html" class="btn btn-primary" style="width:100%;">
+        📝 Input Data Survei
+      </a>
+    </div>
+  </div>
+
+  <!-- Map Container -->
+  <div id="map-container">
+    <div id="main-map"></div>
+    <div id="map-loading">
+      <div class="spinner"></div>
+      Memuat peta...
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/js/map.js"></script>
+</body>
+</html>

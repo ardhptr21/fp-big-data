@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env.local
+.git/
+*.md
+node_modules/
+.vscode/
