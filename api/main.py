@@ -10,11 +10,13 @@ import uuid
 import asyncio
 import logging
 import subprocess
+import math
+import time
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -34,6 +36,19 @@ TOPIC_SURVEY = os.environ.get("KAFKA_TOPIC_SURVEY", "survey-events")
 TOPIC_SECONDARY = os.environ.get("KAFKA_TOPIC_SECONDARY", "secondary-batch")
 SPARK_MASTER = os.environ.get("SPARK_MASTER", "spark://spark:7077")
 SPARK_JOBS_PATH = os.environ.get("SPARK_JOBS_PATH", "/opt/spark_jobs")
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
+SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "768m")
+SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
+
+try:
+    SPARK_LOCAL_THREADS = max(1, int(os.environ.get("SPARK_LOCAL_THREADS", "1")))
+except ValueError:
+    SPARK_LOCAL_THREADS = 1
+
+try:
+    PIPELINE_DEBOUNCE_SECONDS = max(0.0, float(os.environ.get("PIPELINE_DEBOUNCE_SECONDS", "15")))
+except ValueError:
+    PIPELINE_DEBOUNCE_SECONDS = 15.0
 
 # SSE event queue
 sse_clients: List[asyncio.Queue] = []
@@ -42,6 +57,26 @@ sse_clients: List[asyncio.Queue] = []
 _cache: Dict[str, Any] = {}
 _cache_ts: Dict[str, float] = {}
 CACHE_TTL = 30  # seconds
+
+# Single-flight Spark pipeline state. Requests are debounced and coalesced so
+# low-memory machines do not run multiple PySpark driver processes at once.
+_pipeline_lock = asyncio.Lock()
+_pipeline_task: Optional[asyncio.Task] = None
+_pipeline_pending = False
+_pipeline_last_requested = 0.0
+_pipeline_affected_ids: set[str] = set()
+_pipeline_state: Dict[str, Any] = {
+    "state": "idle",
+    "running": False,
+    "pending": False,
+    "version": 0,
+    "last_requested_at": None,
+    "last_started_at": None,
+    "last_completed_at": None,
+    "last_error": None,
+    "jobs_ok": {},
+    "affected_ids": [],
+}
 
 # ============================================================
 # LIFESPAN
@@ -103,6 +138,10 @@ class SurveyEvent(BaseModel):
     catatan: Optional[str] = ""
 
 
+class PipelineTrigger(BaseModel):
+    affected_ids: List[str] = Field(default_factory=list)
+
+
 # ============================================================
 # HELPER: Kafka Producer
 # ============================================================
@@ -135,12 +174,18 @@ def get_spark():
     builder = (
         SparkSession.builder
         .appName("SlumAPI")
-        .master("local[2]")  # local mode - API runs Spark in-process
+        .master(f"local[{SPARK_LOCAL_THREADS}]")  # local mode - API runs Spark in-process
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.hadoop.fs.defaultFS", HDFS_URL)
         .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
         .config("spark.driver.memory", "512m")
+        .config("spark.driver.maxResultSize", "128m")
+        .config("spark.sql.shuffle.partitions", SPARK_SHUFFLE_PARTITIONS)
+        .config("spark.default.parallelism", max(1, int(SPARK_LOCAL_THREADS)))
+        .config("spark.python.worker.memory", "256m")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
         .config("spark.ui.enabled", "false")
     )
     return configure_spark_with_delta_pip(builder).getOrCreate()
@@ -172,11 +217,151 @@ def invalidate_cache():
     _cache_ts.clear()
 
 
+def stop_api_spark():
+    """Stop the API-owned SparkSession before launching heavier pipeline jobs."""
+    try:
+        from pyspark.sql import SparkSession
+        spark = SparkSession.getActiveSession()
+        if spark is not None:
+            log.info("Stopping API Spark session before pipeline run")
+            spark.stop()
+    except Exception as e:
+        log.warning("Could not stop API Spark session: %s", e)
+
+
+def filter_wilayah_rows(
+    rows: list,
+    kecamatan: Optional[str] = None,
+    kelurahan: Optional[str] = None,
+    rw: Optional[str] = None,
+    rt: Optional[str] = None,
+    q: Optional[str] = None,
+) -> list:
+    """Apply lightweight master wilayah filters after the cached Delta read."""
+    filtered = rows
+    for key, value in {
+        "kecamatan": kecamatan,
+        "kelurahan": kelurahan,
+        "rw": rw,
+        "rt": rt,
+    }.items():
+        if value:
+            filtered = [r for r in filtered if str(r.get(key, "")) == str(value)]
+
+    if q:
+        needle = q.lower()
+        filtered = [
+            r for r in filtered
+            if needle in " ".join(str(r.get(k, "")) for k in (
+                "id_wilayah", "kecamatan", "kelurahan", "rw", "rt"
+            )).lower()
+        ]
+
+    return filtered
+
+
+def parse_bbox_param(bbox: Optional[str]) -> Optional[tuple]:
+    """Parse bbox=minLng,minLat,maxLng,maxLat."""
+    if not bbox:
+        return None
+    try:
+        parts = [float(v.strip()) for v in bbox.split(",")]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bbox must contain numeric values")
+    if len(parts) != 4:
+        raise HTTPException(status_code=400, detail="bbox must be minLng,minLat,maxLng,maxLat")
+    min_lng, min_lat, max_lng, max_lat = parts
+    return (
+        min(min_lng, max_lng),
+        min(min_lat, max_lat),
+        max(min_lng, max_lng),
+        max(min_lat, max_lat),
+    )
+
+
+def iter_geometry_points(coords):
+    """Yield (lng, lat) pairs from nested GeoJSON coordinates."""
+    if not isinstance(coords, (list, tuple)):
+        return
+    if len(coords) >= 2 and all(isinstance(v, (int, float)) for v in coords[:2]):
+        yield float(coords[0]), float(coords[1])
+        return
+    for item in coords:
+        yield from iter_geometry_points(item)
+
+
+def geometry_bounds(geometry: dict) -> Optional[tuple]:
+    points = list(iter_geometry_points(geometry.get("coordinates", [])))
+    if not points:
+        return None
+    lngs = [p[0] for p in points]
+    lats = [p[1] for p in points]
+    return min(lngs), min(lats), max(lngs), max(lats)
+
+
+def point_to_box_geometry(lng: float, lat: float, area_m2: float = 0.0) -> dict:
+    """Convert a clicked point to a small GeoJSON square polygon for choropleth display."""
+    try:
+        side_m = math.sqrt(float(area_m2)) if float(area_m2) > 0 else 450.0
+    except (TypeError, ValueError):
+        side_m = 450.0
+    side_m = min(max(side_m, 120.0), 700.0)
+    half_lat = (side_m / 2) / 111_320
+    meters_per_lng = 111_320 * max(math.cos(math.radians(lat)), 0.2)
+    half_lng = (side_m / 2) / meters_per_lng
+    return {
+        "type": "Polygon",
+        "coordinates": [[
+            [lng - half_lng, lat - half_lat],
+            [lng + half_lng, lat - half_lat],
+            [lng + half_lng, lat + half_lat],
+            [lng - half_lng, lat + half_lat],
+            [lng - half_lng, lat - half_lat],
+        ]],
+    }
+
+
+def normalize_geojson_geometry(value: Any, area_m2: float = 0.0) -> dict:
+    """Accept GeoJSON Point/Polygon text and normalize Points into polygons."""
+    geometry = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(geometry, dict):
+        raise ValueError("geometry must be a GeoJSON object")
+
+    geom_type = geometry.get("type")
+    if geom_type == "Point":
+        coords = geometry.get("coordinates", [])
+        if not isinstance(coords, list) or len(coords) < 2:
+            raise ValueError("Point geometry must contain [lng, lat]")
+        return point_to_box_geometry(float(coords[0]), float(coords[1]), area_m2)
+
+    if geom_type in {"Polygon", "MultiPolygon"}:
+        if not geometry_bounds(geometry):
+            raise ValueError(f"{geom_type} geometry has no coordinates")
+        return geometry
+
+    raise ValueError("geometry must be GeoJSON Point, Polygon, or MultiPolygon")
+
+
+def bbox_intersects(a: tuple, b: tuple) -> bool:
+    return not (a[2] < b[0] or a[0] > b[2] or a[3] < b[1] or a[1] > b[3])
+
+
+def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    radius = 6371.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * radius * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 # ============================================================
 # HELPER: Broadcast SSE event
 # ============================================================
-async def broadcast_sse(event_type: str, data: dict = {}):
+async def broadcast_sse(event_type: str, data: Optional[dict] = None):
     """Send Server-Sent Event to all connected clients."""
+    data = data or {}
     msg = json.dumps({"type": event_type, "timestamp": datetime.utcnow().isoformat(), **data})
     dead = []
     for q in sse_clients:
@@ -187,6 +372,31 @@ async def broadcast_sse(event_type: str, data: dict = {}):
     for q in dead:
         if q in sse_clients:
             sse_clients.remove(q)
+
+
+def pipeline_status_payload() -> dict:
+    payload = dict(_pipeline_state)
+    payload["pending"] = _pipeline_pending
+    payload["running"] = _pipeline_lock.locked() or payload.get("state") in {"queued", "running"}
+    payload["affected_ids"] = sorted(set(payload.get("affected_ids") or []) | _pipeline_affected_ids)
+    return payload
+
+
+def set_pipeline_state(state: str, **extra):
+    _pipeline_state["state"] = state
+    _pipeline_state["last_event_at"] = datetime.utcnow().isoformat()
+    if state in {"queued", "running"}:
+        _pipeline_state["running"] = True
+    if state == "queued":
+        _pipeline_state["last_requested_at"] = _pipeline_state["last_event_at"]
+    elif state == "running":
+        _pipeline_state["last_started_at"] = _pipeline_state["last_event_at"]
+        _pipeline_state["last_error"] = None
+    elif state in {"succeeded", "failed"}:
+        _pipeline_state["running"] = False
+        _pipeline_state["last_completed_at"] = _pipeline_state["last_event_at"]
+        _pipeline_state["version"] = int(_pipeline_state.get("version") or 0) + 1
+    _pipeline_state.update(extra)
 
 
 # ============================================================
@@ -203,6 +413,10 @@ def run_spark_job(job_file: str) -> bool:
     env.update({
         "HDFS_URL": HDFS_URL,
         "SPARK_MASTER": SPARK_MASTER,
+        "SPARK_LOCAL_THREADS": str(SPARK_LOCAL_THREADS),
+        "SPARK_DRIVER_MEMORY": SPARK_DRIVER_MEMORY,
+        "SPARK_EXECUTOR_MEMORY": SPARK_EXECUTOR_MEMORY,
+        "SPARK_SHUFFLE_PARTITIONS": SPARK_SHUFFLE_PARTITIONS,
         "PYSPARK_PYTHON": "python3",
         "PYSPARK_DRIVER_PYTHON": "python3",
     })
@@ -232,14 +446,73 @@ def run_spark_job(job_file: str) -> bool:
         return False
 
 
+async def request_pipeline(reason: str, affected_ids: Optional[List[str]] = None) -> str:
+    """Queue one debounced pipeline run and coalesce duplicate triggers."""
+    global _pipeline_pending, _pipeline_last_requested, _pipeline_task
+
+    _pipeline_pending = True
+    _pipeline_last_requested = time.time()
+    for wid in affected_ids or []:
+        if wid:
+            _pipeline_affected_ids.add(str(wid))
+
+    if _pipeline_task is None or _pipeline_task.done():
+        _pipeline_task = asyncio.create_task(pipeline_worker())
+        status = "queued"
+    elif _pipeline_lock.locked():
+        status = "running"
+    else:
+        status = "queued"
+
+    set_pipeline_state("queued", affected_ids=sorted(_pipeline_affected_ids))
+    await broadcast_sse("processing_queued", {
+        "reason": reason,
+        "pipeline": pipeline_status_payload(),
+    })
+    log.info("Pipeline trigger accepted: reason=%s status=%s", reason, status)
+    return status
+
+
+async def pipeline_worker():
+    """Debounce trigger bursts, then run at most one full Spark pipeline at a time."""
+    global _pipeline_pending, _pipeline_task
+
+    try:
+        while True:
+            while True:
+                elapsed = time.time() - _pipeline_last_requested
+                remaining = PIPELINE_DEBOUNCE_SECONDS - elapsed
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(remaining, PIPELINE_DEBOUNCE_SECONDS))
+
+            async with _pipeline_lock:
+                if not _pipeline_pending:
+                    break
+                _pipeline_pending = False
+                await run_pipeline()
+
+            if not _pipeline_pending:
+                break
+    finally:
+        _pipeline_task = None
+        if _pipeline_pending:
+            _pipeline_task = asyncio.create_task(pipeline_worker())
+
+
 # ============================================================
 # BACKGROUND TASK: Full pipeline processing
 # ============================================================
 async def run_pipeline():
     """Run full processing pipeline: Bronze→Silver→Gold."""
+    global _pipeline_affected_ids
     loop = asyncio.get_event_loop()
-    await broadcast_sse("processing_started")
+    current_affected_ids = sorted(_pipeline_affected_ids)
+    set_pipeline_state("running", affected_ids=current_affected_ids)
+    await broadcast_sse("processing_started", {"pipeline": pipeline_status_payload()})
     log.info("=== Pipeline started ===")
+
+    await loop.run_in_executor(None, stop_api_spark)
 
     # Job 1: Bronze → Silver
     ok1 = await loop.run_in_executor(None, run_spark_job, "job1_bronze_silver.py")
@@ -262,8 +535,28 @@ async def run_pipeline():
     else:
         log.warning("Job 3 had issues, continuing...")
 
+    jobs_ok = {
+        "job1_bronze_silver": ok1,
+        "job2_train_model": ok2,
+        "job3_silver_gold": ok3,
+    }
+    pipeline_success = bool(ok1 and ok3)
+    set_pipeline_state(
+        "succeeded" if pipeline_success else "failed",
+        jobs_ok=jobs_ok,
+        affected_ids=current_affected_ids,
+        last_error=None if pipeline_success else "One or more required Spark jobs failed",
+    )
+    for wid in current_affected_ids:
+        _pipeline_affected_ids.discard(wid)
+
     invalidate_cache()
-    await broadcast_sse("map_updated", {"jobs_ok": [ok1, ok2, ok3]})
+    payload = {
+        "jobs_ok": [ok1, ok2, ok3],
+        "affected_ids": current_affected_ids,
+        "pipeline": pipeline_status_payload(),
+    }
+    await broadcast_sse("map_updated" if pipeline_success else "processing_failed", payload)
     log.info("=== Pipeline complete, SSE sent ===")
 
 
@@ -275,17 +568,71 @@ async def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
+@app.get("/api/pipeline/status")
+async def get_pipeline_status():
+    """Return the current pipeline queue/running/completion state."""
+    return pipeline_status_payload()
+
+
 # ============================================================
 # ROUTES: Wilayah (Master)
 # ============================================================
 @app.get("/api/wilayah")
-async def get_wilayah():
-    """Return all registered wilayah as tree structure."""
+async def get_wilayah(
+    kecamatan: Optional[str] = None,
+    kelurahan: Optional[str] = None,
+    rw: Optional[str] = None,
+    rt: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = Query(500, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    """Return registered wilayah with optional filtering and pagination."""
     path = f"{HDFS_URL}/data/bronze/master_wilayah"
     rows = read_delta(path)
     if rows is None:
-        return {"wilayah": [], "total": 0}
-    return {"wilayah": rows, "total": len(rows)}
+        return {"wilayah": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
+
+    filtered = filter_wilayah_rows(rows, kecamatan, kelurahan, rw, rt, q)
+    page = filtered[offset:offset + limit]
+    return {
+        "wilayah": page,
+        "total": len(filtered),
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(page) < len(filtered),
+    }
+
+
+@app.get("/api/wilayah/options")
+async def get_wilayah_options(
+    level: str = Query(..., pattern="^(kecamatan|kelurahan|rw|rt)$"),
+    kecamatan: Optional[str] = None,
+    kelurahan: Optional[str] = None,
+    rw: Optional[str] = None,
+):
+    """Return distinct option values for cascading wilayah selectors."""
+    path = f"{HDFS_URL}/data/bronze/master_wilayah"
+    rows = read_delta(path) or []
+    filtered = filter_wilayah_rows(rows, kecamatan=kecamatan, kelurahan=kelurahan, rw=rw)
+    options = sorted({str(r.get(level, "")) for r in filtered if r.get(level) not in (None, "")})
+    return {"level": level, "options": options, "total": len(options)}
+
+
+@app.get("/api/wilayah/lookup")
+async def lookup_wilayah(
+    kecamatan: str,
+    kelurahan: str,
+    rw: str,
+    rt: str,
+):
+    """Find one wilayah from cascading selector values."""
+    path = f"{HDFS_URL}/data/bronze/master_wilayah"
+    rows = read_delta(path) or []
+    filtered = filter_wilayah_rows(rows, kecamatan=kecamatan, kelurahan=kelurahan, rw=rw, rt=rt)
+    if not filtered:
+        raise HTTPException(status_code=404, detail="Wilayah not found")
+    return filtered[0]
 
 
 @app.post("/api/wilayah", status_code=201)
@@ -308,6 +655,16 @@ async def create_wilayah(wilayah: WilayahCreate):
             # Table doesn't exist yet — that's OK
             pass
 
+        geometry_wkt = ""
+        if wilayah.geometry_wkt:
+            try:
+                geometry_wkt = json.dumps(
+                    normalize_geojson_geometry(wilayah.geometry_wkt, wilayah.luas_m2),
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as e:
+                raise HTTPException(status_code=400, detail=f"Invalid geometry_wkt: {e}")
+
         row = Row(
             id_wilayah=wilayah.id_wilayah,
             kota=wilayah.kota,
@@ -318,7 +675,7 @@ async def create_wilayah(wilayah: WilayahCreate):
             total_kk=wilayah.total_kk,
             total_jiwa=wilayah.total_jiwa,
             luas_m2=wilayah.luas_m2,
-            geometry_wkt=wilayah.geometry_wkt or "",
+            geometry_wkt=geometry_wkt,
             created_at=datetime.utcnow(),
         )
 
@@ -326,6 +683,10 @@ async def create_wilayah(wilayah: WilayahCreate):
         df.write.format("delta").mode("append").option("mergeSchema", "true").save(path)
 
         invalidate_cache()
+        await broadcast_sse("wilayah_registered", {
+            "id_wilayah": wilayah.id_wilayah,
+            "affected_ids": [wilayah.id_wilayah],
+        })
         log.info(f"Wilayah registered: {wilayah.id_wilayah}")
         return {"status": "created", "id_wilayah": wilayah.id_wilayah}
 
@@ -340,8 +701,8 @@ async def create_wilayah(wilayah: WilayahCreate):
 # ROUTES: Survey
 # ============================================================
 @app.post("/api/survey", status_code=201)
-async def submit_survey(event: SurveyEvent, background_tasks: BackgroundTasks):
-    """Submit a survey event — produces to Kafka, triggers pipeline."""
+async def submit_survey(event: SurveyEvent):
+    """Submit a survey event. The consumer triggers processing after Bronze write."""
     event_id = str(uuid.uuid4())
     recorded_at = datetime.utcnow().isoformat()
 
@@ -350,20 +711,17 @@ async def submit_survey(event: SurveyEvent, background_tasks: BackgroundTasks):
     payload["recorded_at"] = recorded_at
 
     produce_kafka_message(TOPIC_SURVEY, payload)
-    # Also trigger pipeline immediately for responsiveness
-    background_tasks.add_task(run_pipeline)
 
     return {
         "status": "accepted",
         "event_id": event_id,
         "recorded_at": recorded_at,
-        "message": "Data diterima, pipeline sedang berjalan..."
+        "message": "Data diterima, pipeline akan berjalan setelah data masuk Bronze..."
     }
 
 
 @app.post("/api/secondary/upload", status_code=201)
 async def upload_secondary(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     source_type: str = Form("ground_truth")
 ):
@@ -384,8 +742,6 @@ async def upload_secondary(
         produce_kafka_message(TOPIC_SECONDARY, payload)
         count += 1
 
-    background_tasks.add_task(run_pipeline)
-
     return {
         "status": "accepted",
         "rows_ingested": count,
@@ -397,8 +753,15 @@ async def upload_secondary(
 # ROUTES: Map (GeoJSON for Leaflet.js)
 # ============================================================
 @app.get("/api/map/risk-score")
-async def get_map_risk_score():
-    """Return GeoJSON FeatureCollection with risk scores per wilayah."""
+async def get_map_risk_score(
+    bbox: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    ids: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Return paged GeoJSON FeatureCollection with risk scores per wilayah."""
     gold_path = f"{HDFS_URL}/data/gold/slum_risk_score"
     wilayah_path = f"{HDFS_URL}/data/bronze/master_wilayah"
 
@@ -406,7 +769,23 @@ async def get_map_risk_score():
     wilayah_rows = read_delta(wilayah_path)
 
     if not wilayah_rows:
-        return {"type": "FeatureCollection", "features": []}
+        return {
+            "type": "FeatureCollection",
+            "features": [],
+            "total": 0,
+            "returned": 0,
+            "limit": limit,
+            "offset": offset,
+            "has_more": False,
+        }
+
+    bbox_filter = parse_bbox_param(bbox)
+    point = None
+    if lat is not None or lng is not None:
+        if lat is None or lng is None:
+            raise HTTPException(status_code=400, detail="lat and lng must be provided together")
+        point = (lat, lng)
+    id_filter = {part.strip() for part in ids.split(",") if part.strip()} if ids else set()
 
     # Build a dict from gold data for quick lookup
     gold_map = {}
@@ -417,13 +796,19 @@ async def get_map_risk_score():
     features = []
     for w in wilayah_rows:
         wid = w.get("id_wilayah", "")
+        if id_filter and wid not in id_filter:
+            continue
         geom = w.get("geometry_wkt", "")
         if not geom:
             continue
 
         try:
-            geometry = json.loads(geom)
+            geometry = normalize_geojson_geometry(geom, w.get("luas_m2", 0) or 0)
         except Exception:
+            continue
+
+        bounds = geometry_bounds(geometry)
+        if not id_filter and bbox_filter and bounds and not bbox_intersects(bounds, bbox_filter):
             continue
 
         gold = gold_map.get(wid, {})
@@ -434,6 +819,7 @@ async def get_map_risk_score():
             "rt": w.get("rt", ""),
             "rw": w.get("rw", ""),
             "total_jiwa": w.get("total_jiwa", 0),
+            "luas_m2": w.get("luas_m2", 0),
             "risk_score": gold.get("risk_score", None),
             "risk_level": gold.get("risk_level", "Belum Didata"),
             "proba_kumuh": gold.get("proba_kumuh", None),
@@ -445,13 +831,31 @@ async def get_map_risk_score():
             "prioritas_rank": gold.get("prioritas_rank", None),
         }
 
+        if point and bounds:
+            center_lng = (bounds[0] + bounds[2]) / 2
+            center_lat = (bounds[1] + bounds[3]) / 2
+            props["distance_km"] = round(haversine_km(point[0], point[1], center_lat, center_lng), 3)
+
         features.append({
             "type": "Feature",
             "geometry": geometry,
             "properties": props
         })
 
-    return {"type": "FeatureCollection", "features": features}
+    if point:
+        features.sort(key=lambda f: f["properties"].get("distance_km", float("inf")))
+
+    total = len(features)
+    page = features[offset:offset + limit]
+    return {
+        "type": "FeatureCollection",
+        "features": page,
+        "total": total,
+        "returned": len(page),
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(page) < total,
+    }
 
 
 @app.get("/api/map/prediction")
@@ -579,7 +983,7 @@ async def stream_updates():
     async def event_generator():
         try:
             # Send initial connection event
-            yield f"data: {json.dumps({'type': 'connected', 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+            yield f"data: {json.dumps({'type': 'connected', 'timestamp': datetime.utcnow().isoformat(), 'pipeline': pipeline_status_payload()})}\n\n"
             while True:
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=30)
@@ -608,7 +1012,14 @@ async def stream_updates():
 # ROUTES: Internal (called by consumer)
 # ============================================================
 @app.post("/api/internal/trigger-processing")
-async def trigger_processing(background_tasks: BackgroundTasks):
-    """Called by Kafka consumer after writing to Bronze. Triggers Spark pipeline."""
-    background_tasks.add_task(run_pipeline)
-    return {"status": "triggered", "timestamp": datetime.utcnow().isoformat()}
+async def trigger_processing(payload: Optional[PipelineTrigger] = Body(None)):
+    """Called by Kafka consumer after writing to Bronze. Debounces Spark pipeline."""
+    affected_ids = payload.affected_ids if payload else []
+    status = await request_pipeline("consumer", affected_ids)
+    return {
+        "status": status,
+        "debounce_seconds": PIPELINE_DEBOUNCE_SECONDS,
+        "affected_ids": sorted(_pipeline_affected_ids),
+        "pipeline": pipeline_status_payload(),
+        "timestamp": datetime.utcnow().isoformat(),
+    }

@@ -5,6 +5,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    procps \
     default-jdk-headless \
     && rm -rf /var/lib/apt/lists/*
 

@@ -127,10 +127,10 @@
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">
             <!-- Mini Map -->
             <div>
-              <div class="form-label" style="margin-bottom:0.5rem;">Klik peta untuk set titik lokasi</div>
+              <div class="form-label" style="margin-bottom:0.5rem;">Klik peta untuk membuat kotak wilayah</div>
               <div id="mini-map"></div>
               <div id="map-coords" style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem;">
-                Klik pada peta untuk menandai lokasi RT/RW
+                Klik pada peta untuk membuat area RT/RW
               </div>
             </div>
             <!-- GeoJSON Input -->
@@ -140,7 +140,7 @@
                 placeholder='{"type":"Polygon","coordinates":[[[112.752, -7.245],[112.756, -7.245],[112.756, -7.248],[112.752, -7.248],[112.752, -7.245]]]}'
                 style="font-family:monospace;font-size:0.75rem;"></textarea>
               <div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem;">
-                Format: GeoJSON <code>Polygon</code> atau <code>Point</code>
+                Format: GeoJSON <code>Polygon</code>. Klik peta akan membuat kotak otomatis.
               </div>
             </div>
           </div>
@@ -201,19 +201,54 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   attribution: '© CARTO', subdomains: 'abcd'
 }).addTo(miniMap);
 
-let marker = null;
+let geometryPreview = null;
+let selectedLatLng = null;
+
+function buildBoxGeometry(lng, lat) {
+  const area = parseFloat(document.getElementById('luas_m2').value || '0');
+  let sideM = Number.isFinite(area) && area > 0 ? Math.sqrt(area) : 450;
+  sideM = Math.min(Math.max(sideM, 120), 700);
+  const halfLat = (sideM / 2) / 111320;
+  const metersPerLng = 111320 * Math.max(Math.cos(lat * Math.PI / 180), 0.2);
+  const halfLng = (sideM / 2) / metersPerLng;
+  return {
+    type: "Polygon",
+    coordinates: [[
+      [lng - halfLng, lat - halfLat],
+      [lng + halfLng, lat - halfLat],
+      [lng + halfLng, lat + halfLat],
+      [lng - halfLng, lat + halfLat],
+      [lng - halfLng, lat - halfLat],
+    ]]
+  };
+}
+
+function setGeometryFromMap(lat, lng) {
+  selectedLatLng = { lat, lng };
+  const geojson = buildBoxGeometry(lng, lat);
+  if (geometryPreview) geometryPreview.remove();
+  geometryPreview = L.geoJSON(geojson, {
+    style: {
+      color: '#14b8a6',
+      weight: 2,
+      fillColor: '#14b8a6',
+      fillOpacity: 0.28,
+    }
+  }).addTo(miniMap);
+  miniMap.fitBounds(geometryPreview.getBounds(), { padding: [24, 24], maxZoom: 16 });
+  document.getElementById('geometry_wkt').value = JSON.stringify(geojson, null, 2);
+  document.getElementById('map-coords').textContent = `Area sekitar: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+}
+
 miniMap.on('click', (e) => {
   const {lat, lng} = e.latlng;
-  if (marker) marker.remove();
-  marker = L.marker([lat, lng]).addTo(miniMap);
+  setGeometryFromMap(lat, lng);
+});
 
-  // Auto-fill geometry as a point
-  const geojson = JSON.stringify({
-    type: "Point",
-    coordinates: [lng, lat]
-  });
-  document.getElementById('geometry_wkt').value = geojson;
-  document.getElementById('map-coords').textContent = `Koordinat: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+document.getElementById('luas_m2').addEventListener('input', () => {
+  if (selectedLatLng) {
+    setGeometryFromMap(selectedLatLng.lat, selectedLatLng.lng);
+  }
 });
 
 // ====== ID Preview ======
@@ -324,8 +359,9 @@ async function loadWilayahList() {
 function resetForm() {
   document.getElementById('id-preview').textContent = '—';
   document.getElementById('register-result').innerHTML = '';
-  if (marker) { marker.remove(); marker = null; }
-  document.getElementById('map-coords').textContent = 'Klik pada peta untuk menandai lokasi RT/RW';
+  if (geometryPreview) { geometryPreview.remove(); geometryPreview = null; }
+  selectedLatLng = null;
+  document.getElementById('map-coords').textContent = 'Klik pada peta untuk membuat area RT/RW';
 }
 
 function showToast(type, title, msg, duration = 4000) {

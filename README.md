@@ -24,7 +24,7 @@
 |---|---|---|
 | Hadoop HDFS | `apache/hadoop:3` | Distributed storage (NameNode + DataNode) |
 | Kafka | `bitnami/kafka:3.6` | Message broker ingest |
-| Spark | `bitnami/spark:3.5` | Processing engine (PySpark + MLlib) |
+| Spark | `apache/spark:3.5` / local PySpark | Processing engine (PySpark + MLlib) |
 | Delta Lake | `delta-spark` 3.2 | Lakehouse layer + time travel |
 | FastAPI | `python:3.11-slim` | Backend REST API + SSE streaming |
 | Frontend | `nginx:alpine` | Web UI + Leaflet.js peta |
@@ -34,8 +34,8 @@
 ### Prerequisite
 - Docker Engine ≥ 24.0
 - Docker Compose ≥ 2.0
-- RAM minimal 8GB (direkomendasikan 12GB+)
-- Port bebas: 3000, 8000, 8080, 9000, 9092, 9870
+- RAM minimal 4-6GB untuk mode lokal rendah memori (direkomendasikan 8GB+)
+- Port bebas: 3000, 8000, 9000, 9092, 9870
 
 ### Full startup (direkomendasikan)
 ```bash
@@ -49,7 +49,7 @@ bash startup.sh
 docker compose build
 
 # 2. Start infrastructure
-docker compose up -d namenode datanode zookeeper kafka spark spark-worker
+docker compose up -d namenode datanode kafka
 
 # 3. Init HDFS directories (tunggu namenode ready)
 docker compose up hdfs-init
@@ -59,6 +59,12 @@ docker compose up -d consumer api frontend
 
 # 5. Seed data awal
 make seed
+```
+
+Standalone Spark master/worker bersifat opsional untuk debugging Spark UI:
+
+```bash
+docker compose --profile spark-standalone up -d spark spark-worker
 ```
 
 ### Menggunakan Makefile
@@ -82,7 +88,7 @@ make clean       # Hapus semua data (destructive!)
 | **API (FastAPI)** | http://localhost:8000 |
 | **API Documentation** | http://localhost:8000/docs |
 | **HDFS Web UI** | http://localhost:9870 |
-| **Spark Web UI** | http://localhost:8080 |
+| **Spark Web UI** | http://localhost:8080 (opsional: profile `spark-standalone`) |
 
 ## 📄 Halaman Web UI
 

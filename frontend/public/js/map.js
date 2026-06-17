@@ -12,7 +12,7 @@ const map = L.map('main-map', {
   center: [-7.2575, 112.7521],
   zoom: 12,
   zoomControl: true,
-  preferCanvas: false,
+  preferCanvas: true,
 });
 
 // Base tile layers
@@ -71,6 +71,10 @@ function getRiskBarClass(level) {
 let geojsonLayer = null;
 let rawGeoData = null;
 let selectedLayer = 'risk'; // 'risk' | 'prediction'
+let selectedPoint = null;
+let mapLoadToken = 0;
+let nextMapOffset = 0;
+const MAP_PAGE_SIZE = 50;
 
 function styleFeature(feature) {
   const props = feature.properties;
@@ -99,10 +103,32 @@ function resetHighlight(e) {
   geojsonLayer.resetStyle(e.target);
 }
 
+function pointBounds(latlng, feature) {
+  const area = Number(feature.properties?.luas_m2 || 0);
+  let sideM = area > 0 ? Math.sqrt(area) : 450;
+  sideM = Math.min(Math.max(sideM, 120), 700);
+  const halfLat = (sideM / 2) / 111320;
+  const metersPerLng = 111320 * Math.max(Math.cos(latlng.lat * Math.PI / 180), 0.2);
+  const halfLng = (sideM / 2) / metersPerLng;
+  return [
+    [latlng.lat - halfLat, latlng.lng - halfLng],
+    [latlng.lat + halfLat, latlng.lng + halfLng],
+  ];
+}
+
+function layerBounds(layer) {
+  if (layer.getBounds) return layer.getBounds();
+  if (layer.getLatLng) {
+    const latlng = layer.getLatLng();
+    return L.latLngBounds([latlng, latlng]);
+  }
+  return null;
+}
+
 function buildPopup(props) {
-  const score = props.risk_score !== null ? `${props.risk_score?.toFixed(1)}` : '—';
+  const score = props.risk_score != null ? `${props.risk_score?.toFixed(1)}` : '—';
   const level = props.risk_level || 'Belum Didata';
-  const proba = props.proba_kumuh !== null ? `${(props.proba_kumuh * 100)?.toFixed(1)}%` : '—';
+  const proba = props.proba_kumuh != null ? `${(props.proba_kumuh * 100)?.toFixed(1)}%` : '—';
   const jiwa = (props.total_jiwa || 0).toLocaleString('id-ID');
 
   const factors = [props.top_faktor_1, props.top_faktor_2, props.top_faktor_3]
@@ -149,23 +175,119 @@ function onEachFeature(feature, layer) {
   layer.on({
     mouseover: highlightFeature,
     mouseout: resetHighlight,
+    click: (e) => L.DomEvent.stopPropagation(e),
   });
 }
 
-async function loadMapData() {
-  showMapLoading(true);
+function getMapQuery(offset = 0) {
+  const params = new URLSearchParams({
+    limit: String(MAP_PAGE_SIZE),
+    offset: String(offset),
+  });
+
+  if (selectedPoint) {
+    params.set('lat', String(selectedPoint.lat));
+    params.set('lng', String(selectedPoint.lng));
+  } else {
+    const b = map.getBounds();
+    params.set('bbox', [
+      b.getWest().toFixed(6),
+      b.getSouth().toFixed(6),
+      b.getEast().toFixed(6),
+      b.getNorth().toFixed(6),
+    ].join(','));
+  }
+
+  return params.toString();
+}
+
+function mergeGeoData(data, append) {
+  if (!append || !rawGeoData) {
+    rawGeoData = {
+      type: 'FeatureCollection',
+      features: [],
+      total: data.total || 0,
+      returned: 0,
+      has_more: false,
+    };
+  }
+
+  const indexById = new Map((rawGeoData.features || []).map((f, index) => [f.properties?.id_wilayah, index]));
+  (data.features || []).forEach(feature => {
+    const id = feature.properties?.id_wilayah;
+    if (!id) return;
+    if (indexById.has(id)) {
+      rawGeoData.features[indexById.get(id)] = feature;
+    } else {
+      indexById.set(id, rawGeoData.features.length);
+      rawGeoData.features.push(feature);
+    }
+  });
+
+  rawGeoData.total = data.total || rawGeoData.total || 0;
+  rawGeoData.returned = rawGeoData.features.length;
+  rawGeoData.has_more = Boolean(data.has_more);
+}
+
+async function loadMapData({ append = false, token = null } = {}) {
+  const activeToken = append ? token : ++mapLoadToken;
+  const offset = append ? nextMapOffset : 0;
+  if (!append) {
+    nextMapOffset = 0;
+    showMapLoading(true);
+  }
+
   try {
-    const res = await fetch(`${API_BASE}/map/risk-score`);
+    const res = await fetch(`${API_BASE}/map/risk-score?${getMapQuery(offset)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    rawGeoData = await res.json();
+    const data = await res.json();
+    if (activeToken !== mapLoadToken) return;
+
+    mergeGeoData(data, append);
+    nextMapOffset = offset + (data.features || []).length;
     renderMapLayer();
-    updateSummaryStats();
+    if (!append) updateSummaryStats();
+
+    if (data.has_more && (data.features || []).length > 0) {
+      setTimeout(() => loadMapData({ append: true, token: activeToken }), 250);
+    } else {
+      showMapLoading(false);
+    }
   } catch (err) {
     console.error('Failed to load map data:', err);
-    showToast('error', 'Gagal memuat peta', err.message);
-  } finally {
+    if (!append) showToast('error', 'Gagal memuat peta', err.message);
     showMapLoading(false);
   }
+}
+
+async function loadWilayahByIds(ids, { focusFirst = false } = {}) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+  if (uniqueIds.length === 0) return;
+
+  const params = new URLSearchParams({
+    ids: uniqueIds.join(','),
+    limit: String(Math.max(uniqueIds.length, MAP_PAGE_SIZE)),
+    offset: '0',
+  });
+
+  try {
+    const res = await fetch(`${API_BASE}/map/risk-score?${params.toString()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    mergeGeoData(data, true);
+    renderMapLayer();
+    if (focusFirst && uniqueIds[0]) {
+      focusWilayah(uniqueIds[0], { openPopup: false });
+    }
+  } catch (err) {
+    console.warn('Failed to load affected wilayah:', err);
+  }
+}
+
+async function refreshMapAfterPipeline(affectedIds = []) {
+  selectedPoint = null;
+  await loadMapData();
+  await loadWilayahByIds(affectedIds, { focusFirst: affectedIds.length === 1 });
 }
 
 function renderMapLayer() {
@@ -176,13 +298,8 @@ function renderMapLayer() {
   geojsonLayer = L.geoJSON(rawGeoData, {
     style: styleFeature,
     onEachFeature,
+    pointToLayer: (feature, latlng) => L.rectangle(pointBounds(latlng, feature), styleFeature(feature)),
   }).addTo(map);
-
-  if (rawGeoData.features && rawGeoData.features.length > 0) {
-    try {
-      map.fitBounds(geojsonLayer.getBounds(), { padding: [20, 20] });
-    } catch (e) { /* ignore */ }
-  }
 
   updateLayerList(rawGeoData.features || []);
 }
@@ -207,7 +324,7 @@ function updateLayerList(features) {
   list.innerHTML = sorted.slice(0, 20).map(f => {
     const p = f.properties;
     const level = p.risk_level || 'Belum Didata';
-    const score = p.risk_score !== null ? p.risk_score?.toFixed(0) : '—';
+    const score = p.risk_score != null ? p.risk_score?.toFixed(0) : '—';
     const barClass = getRiskBarClass(level);
     const pct = p.risk_score ? Math.min(p.risk_score, 100) : 0;
     return `
@@ -224,12 +341,14 @@ function updateLayerList(features) {
   }).join('');
 }
 
-function focusWilayah(id) {
+function focusWilayah(id, options = {}) {
   if (!geojsonLayer) return;
+  const openPopup = options.openPopup !== false;
   geojsonLayer.eachLayer(layer => {
     if (layer.feature && layer.feature.properties.id_wilayah === id) {
-      map.fitBounds(layer.getBounds(), { padding: [60, 60] });
-      layer.openPopup();
+      const bounds = layerBounds(layer);
+      if (bounds) map.fitBounds(bounds, { padding: [60, 60], maxZoom: 16 });
+      if (openPopup) layer.openPopup();
     }
   });
 }
@@ -263,6 +382,66 @@ async function updateSummaryStats() {
 // ============================================================
 let sseSource = null;
 let reconnectTimer = null;
+let pipelinePollTimer = null;
+let pipelineVersion = null;
+let pipelineActive = false;
+
+function isPipelineActive(pipeline) {
+  if (!pipeline) return false;
+  return Boolean(pipeline.running || pipeline.pending || ['queued', 'running'].includes(pipeline.state));
+}
+
+function startPipelinePolling() {
+  if (pipelinePollTimer) return;
+  pipelinePollTimer = setInterval(fetchPipelineStatus, 5000);
+}
+
+function stopPipelinePolling() {
+  if (!pipelinePollTimer) return;
+  clearInterval(pipelinePollTimer);
+  pipelinePollTimer = null;
+}
+
+async function fetchPipelineStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/pipeline/status`, { cache: 'no-store' });
+    if (!res.ok) return;
+    syncPipelineStatus(await res.json());
+  } catch (err) {
+    console.warn('Pipeline status check failed:', err);
+  }
+}
+
+function syncPipelineStatus(pipeline) {
+  if (!pipeline) return;
+
+  const wasActive = pipelineActive;
+  const active = isPipelineActive(pipeline);
+  const version = Number(pipeline.version || 0);
+  pipelineActive = active;
+  updateProcessingIndicator(active);
+
+  if (active) {
+    startPipelinePolling();
+  } else {
+    stopPipelinePolling();
+  }
+
+  if (pipelineVersion == null) {
+    pipelineVersion = version;
+    return;
+  }
+
+  if (!active && version > pipelineVersion && wasActive) {
+    pipelineVersion = version;
+    refreshMapAfterPipeline(pipeline.affected_ids || []);
+    return;
+  }
+
+  if (version > pipelineVersion) {
+    pipelineVersion = version;
+  }
+}
 
 function connectSSE() {
   if (sseSource) {
@@ -299,14 +478,30 @@ function handleSSEMessage(data) {
 
   if (data.type === 'map_updated') {
     showToast('success', 'Peta diperbarui', 'Data baru telah diproses dan peta telah diupdate.');
-    loadMapData();
+    pipelineActive = false;
+    if (data.pipeline?.version != null) pipelineVersion = Number(data.pipeline.version);
+    updateProcessingIndicator(false);
+    stopPipelinePolling();
+    refreshMapAfterPipeline(data.affected_ids || data.pipeline?.affected_ids || []);
+  } else if (data.type === 'processing_failed') {
+    showToast('error', 'Pipeline gagal', 'Pemrosesan selesai dengan error. Cek log API/consumer.');
+    pipelineActive = false;
+    if (data.pipeline?.version != null) pipelineVersion = Number(data.pipeline.version);
+    updateProcessingIndicator(false);
+    stopPipelinePolling();
+  } else if (data.type === 'wilayah_registered') {
+    loadWilayahByIds(data.affected_ids || [data.id_wilayah]);
   } else if (data.type === 'processing_started') {
     showToast('info', 'Processing...', 'Pipeline sedang memproses data baru...');
+    syncPipelineStatus(data.pipeline || { state: 'running', running: true });
+  } else if (data.type === 'processing_queued') {
     updateProcessingIndicator(true);
+    syncPipelineStatus(data.pipeline || { state: 'queued', pending: true });
   } else if (data.type === 'heartbeat') {
     // Keep alive, no UI action
   } else if (data.type === 'connected') {
     console.log('SSE stream connected at', data.timestamp);
+    syncPipelineStatus(data.pipeline);
   }
 }
 
@@ -372,12 +567,31 @@ function showMapLoading(show) {
   if (el) el.style.display = show ? 'flex' : 'none';
 }
 
+function debounce(fn, delay = 400) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delay);
+  };
+}
+
 // ============================================================
 // INIT
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
-  loadMapData();
+  map.whenReady(() => loadMapData());
   connectSSE();
+  fetchPipelineStatus();
+
+  map.on('moveend', debounce(() => {
+    selectedPoint = null;
+    loadMapData();
+  }, 500));
+
+  map.on('click', (e) => {
+    selectedPoint = { lat: e.latlng.lat, lng: e.latlng.lng };
+    loadMapData();
+  });
 
   // Toggle tile buttons
   document.getElementById('btn-tile-dark')?.addEventListener('click', () => {

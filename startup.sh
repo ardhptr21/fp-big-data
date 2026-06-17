@@ -28,8 +28,8 @@ $COMPOSE build --parallel
 
 # Start infrastructure first
 echo ""
-echo "[3/5] Starting infrastructure (HDFS, Kafka, Spark)..."
-$COMPOSE up -d namenode datanode zookeeper kafka spark spark-worker
+echo "[3/5] Starting infrastructure (HDFS, Kafka)..."
+$COMPOSE up -d namenode datanode kafka
 
 echo "   Waiting for HDFS NameNode..."
 until curl -sf http://localhost:9870 > /dev/null 2>&1; do
@@ -65,11 +65,7 @@ echo ""
 echo "======================================================"
 echo " Seeding initial data..."
 echo "======================================================"
-$COMPOSE exec -T api pip install requests -q 2>/dev/null || true
-docker run --rm --network "$(basename $PROJECT_DIR)_slum_net" \
-  -e API_URL=http://api:8000 \
-  -v "$PROJECT_DIR/init_scripts:/init_scripts" \
-  python:3.11-slim \
+$COMPOSE exec -T -e API_URL=http://localhost:8000 api \
   python /init_scripts/seed_wilayah.py 2>&1 | tail -30 || true
 
 echo ""
@@ -82,7 +78,7 @@ echo "   🌐 Frontend (Web UI):  http://localhost:3000"
 echo "   🔌 API (FastAPI):      http://localhost:8000"
 echo "   📚 API Docs:           http://localhost:8000/docs"
 echo "   🐘 HDFS Web UI:        http://localhost:9870"
-echo "   ⚡ Spark Web UI:        http://localhost:8080"
+echo "   ⚡ Spark Web UI:        http://localhost:8080 (optional: spark-standalone profile)"
 echo "   📨 Kafka:              localhost:9092"
 echo ""
 echo " Quick Test:"

@@ -39,6 +39,14 @@ TOPIC_SECONDARY = os.environ.get("KAFKA_TOPIC_SECONDARY", "secondary-batch")
 HDFS_URL = os.environ.get("HDFS_URL", "hdfs://namenode:9000")
 API_URL = os.environ.get("API_URL", "http://api:8000")
 SPARK_MASTER = os.environ.get("SPARK_MASTER", "spark://spark:7077")
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
+SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "768m")
+SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
+
+try:
+    SPARK_LOCAL_THREADS = max(1, int(os.environ.get("SPARK_LOCAL_THREADS", "1")))
+except ValueError:
+    SPARK_LOCAL_THREADS = 1
 
 BRONZE_SURVEY_PATH = f"{HDFS_URL}/data/bronze/survey_events"
 BRONZE_SECONDARY_PATH = f"{HDFS_URL}/data/bronze/secondary_sources"
@@ -86,16 +94,23 @@ SECONDARY_SCHEMA = StructType([
 
 def create_spark_session():
     """Create PySpark session with Delta Lake support."""
+    local_master = f"local[{SPARK_LOCAL_THREADS}]"
     builder = (
         SparkSession.builder
         .appName("SlumConsumer")
-        .master("local[*]")  # Local mode - consumer runs in-process
+        .master(local_master)  # Local mode - consumer runs in-process
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.hadoop.fs.defaultFS", HDFS_URL)
         .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
-        .config("spark.driver.memory", "1g")
-        .config("spark.executor.memory", "1g")
+        .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
+        .config("spark.executor.memory", SPARK_EXECUTOR_MEMORY)
+        .config("spark.driver.maxResultSize", "128m")
+        .config("spark.sql.shuffle.partitions", SPARK_SHUFFLE_PARTITIONS)
+        .config("spark.default.parallelism", SPARK_LOCAL_THREADS)
+        .config("spark.python.worker.memory", "256m")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
         .config("spark.ui.enabled", "false")
     )
     return configure_spark_with_delta_pip(builder).getOrCreate()
@@ -170,10 +185,11 @@ def write_secondary_to_bronze(spark, data: dict):
     log.info(f"Written secondary batch {row.batch_id} (type={row.source_type}) to Bronze")
 
 
-def trigger_processing():
+def trigger_processing(affected_id: str = ""):
     """Notify API to trigger Spark processing jobs."""
     try:
-        resp = requests.post(f"{API_URL}/api/internal/trigger-processing", timeout=5)
+        payload = {"affected_ids": [affected_id]} if affected_id else {}
+        resp = requests.post(f"{API_URL}/api/internal/trigger-processing", json=payload, timeout=5)
         if resp.status_code == 200:
             log.info("Processing triggered successfully")
         else:
@@ -240,29 +256,22 @@ def main():
     )
 
     log.info("Consumer started, polling for messages...")
-    pending_trigger = False
-    last_trigger = time.time()
-
     for message in consumer:
         topic = message.topic
         data = message.value
         log.info(f"Received message from topic={topic}, partition={message.partition}, offset={message.offset}")
 
         try:
+            affected_id = ""
             if topic == TOPIC_SURVEY:
                 write_survey_to_bronze(spark, data)
+                affected_id = data.get("id_wilayah", "")
             elif topic == TOPIC_SECONDARY:
                 write_secondary_to_bronze(spark, data)
-            pending_trigger = True
+                affected_id = data.get("id_wilayah", "")
+            trigger_processing(affected_id)
         except Exception as e:
             log.error(f"Error processing message: {e}", exc_info=True)
-
-        # Trigger processing at most every 10 seconds (batch)
-        now = time.time()
-        if pending_trigger and (now - last_trigger) >= 10:
-            trigger_processing()
-            last_trigger = now
-            pending_trigger = False
 
 
 if __name__ == "__main__":

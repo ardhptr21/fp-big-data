@@ -19,9 +19,18 @@ from pyspark.sql.types import FloatType, StringType, IntegerType
 from delta import configure_spark_with_delta_pip
 
 HDFS_URL = os.environ.get("HDFS_URL", "hdfs://namenode:9000")
-SPARK_MASTER = os.environ.get("SPARK_MASTER", "local[*]")
+try:
+    SPARK_LOCAL_THREADS = max(1, int(os.environ.get("SPARK_LOCAL_THREADS", "1")))
+except ValueError:
+    SPARK_LOCAL_THREADS = 1
+
+SPARK_MASTER = os.environ.get("SPARK_MASTER", f"local[{SPARK_LOCAL_THREADS}]")
 if SPARK_MASTER.startswith("spark://"):
-    SPARK_MASTER = "local[*]"
+    SPARK_MASTER = f"local[{SPARK_LOCAL_THREADS}]"
+
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
+SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "768m")
+SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
 
 SILVER_LATEST = f"{HDFS_URL}/data/silver/latest_indicators"
 SILVER_HISTORY = f"{HDFS_URL}/data/silver/event_history"
@@ -44,8 +53,14 @@ def create_spark():
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.hadoop.fs.defaultFS", HDFS_URL)
         .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
-        .config("spark.driver.memory", "1g")
-        .config("spark.executor.memory", "1g")
+        .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
+        .config("spark.executor.memory", SPARK_EXECUTOR_MEMORY)
+        .config("spark.driver.maxResultSize", "128m")
+        .config("spark.sql.shuffle.partitions", SPARK_SHUFFLE_PARTITIONS)
+        .config("spark.default.parallelism", SPARK_LOCAL_THREADS)
+        .config("spark.python.worker.memory", "256m")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
     )
     return configure_spark_with_delta_pip(builder).getOrCreate()
 
@@ -95,12 +110,13 @@ def get_top_factors(df):
     rows = df.select("id_wilayah", "kelurahan", "kecamatan", *present).collect()
     result = []
     for row in rows:
-        scores = {indicator_labels[c]: (row[c] or 0) for c in present}
+        row_dict = row.asDict()
+        scores = {indicator_labels[c]: (row_dict.get(c) or 0) for c in present}
         sorted_factors = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         result.append({
-            "id_wilayah": row["id_wilayah"],
-            "kelurahan": row.get("kelurahan", ""),
-            "kecamatan": row.get("kecamatan", ""),
+            "id_wilayah": row_dict.get("id_wilayah", ""),
+            "kelurahan": row_dict.get("kelurahan", ""),
+            "kecamatan": row_dict.get("kecamatan", ""),
             "top_faktor_1": sorted_factors[0][0] if len(sorted_factors) > 0 else "",
             "top_faktor_2": sorted_factors[1][0] if len(sorted_factors) > 1 else "",
             "top_faktor_3": sorted_factors[2][0] if len(sorted_factors) > 2 else "",
@@ -151,6 +167,7 @@ def main():
     label_df = None
     try:
         from pyspark.ml import PipelineModel
+        from pyspark.ml.functions import vector_to_array
         model = PipelineModel.load(MODELS_LATEST)
         feature_cols = [
             c for c in ["skor_bangunan", "skor_jalan", "skor_drainase",
@@ -160,10 +177,11 @@ def main():
         ]
         pred_input = scored_df.fillna(0, subset=feature_cols)
         predictions = model.transform(pred_input)
+        probability_array = vector_to_array(F.col("probability"))
         label_df = predictions.select(
             "id_wilayah",
             F.col("prediction").cast(IntegerType()).alias("label_prediksi"),
-            F.round(F.element_at(F.col("probability"), 2), 4).alias("proba_kumuh")
+            F.round(F.element_at(probability_array, 2), 4).alias("proba_kumuh")
         )
         print("ML predictions computed")
     except Exception as e:
@@ -182,6 +200,8 @@ def main():
 
     # Join with master for geometry and jiwa_terdampak
     if has_master:
+        if "geometry_wkt" in gold_df.columns:
+            gold_df = gold_df.drop("geometry_wkt")
         master_geo = master_df.select("id_wilayah", "geometry_wkt",
                                        F.col("total_jiwa").alias("jiwa_terdampak"))
         gold_df = gold_df.join(master_geo, on="id_wilayah", how="left")

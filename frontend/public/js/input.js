@@ -3,86 +3,141 @@
  */
 
 const API_BASE = '/api';
-
-let wilayahData = [];
+const optionCache = new Map();
 
 // ============================================================
 // LOAD WILAYAH
 // ============================================================
 async function loadWilayah() {
   try {
-    const res = await fetch(`${API_BASE}/wilayah`);
-    const data = await res.json();
-    wilayahData = data.wilayah || [];
-    populateKecamatan();
+    const kecs = await fetchWilayahOptions('kecamatan');
+    setSelectOptions(document.getElementById('sel-kecamatan'), '— Pilih Kecamatan —', kecs);
   } catch (e) {
     console.error('Failed to load wilayah:', e);
     showToast('error', 'Gagal memuat daftar wilayah', e.message);
   }
 }
 
-function getUnique(arr, key) {
-  return [...new Set(arr.map(w => w[key]).filter(Boolean))].sort();
+async function fetchWilayahOptions(level, filters = {}) {
+  const params = new URLSearchParams({ level });
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  const cacheKey = params.toString();
+  if (optionCache.has(cacheKey)) return optionCache.get(cacheKey);
+
+  const res = await fetch(`${API_BASE}/wilayah/options?${cacheKey}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  const options = data.options || [];
+  optionCache.set(cacheKey, options);
+  return options;
 }
 
-function populateKecamatan() {
-  const sel = document.getElementById('sel-kecamatan');
-  if (!sel) return;
-  const kecs = getUnique(wilayahData, 'kecamatan');
-  sel.innerHTML = '<option value="">— Pilih Kecamatan —</option>' +
-    kecs.map(k => `<option value="${k}">${k}</option>`).join('');
+function setSelectOptions(select, placeholder, options, labelFn = v => v) {
+  if (!select) return;
+  select.innerHTML = '';
+  select.add(new Option(placeholder, ''));
+  options.forEach(value => {
+    select.add(new Option(labelFn(value), value));
+  });
 }
 
-function onKecamatanChange() {
-  const kec = document.getElementById('sel-kecamatan').value;
-  const filtered = wilayahData.filter(w => w.kecamatan === kec);
-  const sel = document.getElementById('sel-kelurahan');
-  const kels = getUnique(filtered, 'kelurahan');
-  sel.innerHTML = '<option value="">— Pilih Kelurahan —</option>' +
-    kels.map(k => `<option value="${k}">${k}</option>`).join('');
-  document.getElementById('sel-rw').innerHTML = '<option value="">— Pilih RW —</option>';
-  document.getElementById('sel-rt').innerHTML = '<option value="">— Pilih RT —</option>';
+function setSelectLoading(select, label = 'Memuat...') {
+  if (!select) return;
+  select.innerHTML = '';
+  select.add(new Option(label, ''));
+}
+
+function resetWilayahSelection(from = 'kecamatan') {
+  const levels = {
+    kecamatan: [
+      ['sel-kelurahan', '— Pilih Kecamatan dulu —'],
+      ['sel-rw', '— Pilih Kelurahan dulu —'],
+      ['sel-rt', '— Pilih RW dulu —'],
+    ],
+    kelurahan: [
+      ['sel-rw', '— Pilih Kelurahan dulu —'],
+      ['sel-rt', '— Pilih RW dulu —'],
+    ],
+    rw: [
+      ['sel-rt', '— Pilih RW dulu —'],
+    ],
+  };
+  (levels[from] || []).forEach(([id, placeholder]) => {
+    setSelectOptions(document.getElementById(id), placeholder, []);
+  });
   document.getElementById('selected-wilayah-id').value = '';
+  const preview = document.getElementById('wilayah-preview');
+  if (preview) preview.textContent = 'Pilih kecamatan → kelurahan → RW → RT di atas';
 }
 
-function onKelurahanChange() {
+async function onKecamatanChange() {
+  const kec = document.getElementById('sel-kecamatan').value;
+  const sel = document.getElementById('sel-kelurahan');
+  resetWilayahSelection('kecamatan');
+  if (!kec) return;
+  setSelectLoading(sel);
+  try {
+    const kels = await fetchWilayahOptions('kelurahan', { kecamatan: kec });
+    setSelectOptions(sel, '— Pilih Kelurahan —', kels);
+  } catch (e) {
+    showToast('error', 'Gagal mengambil data kelurahan', e.message);
+    setSelectOptions(sel, '— Pilih Kelurahan —', []);
+  }
+}
+
+async function onKelurahanChange() {
   const kec = document.getElementById('sel-kecamatan').value;
   const kel = document.getElementById('sel-kelurahan').value;
-  const filtered = wilayahData.filter(w => w.kecamatan === kec && w.kelurahan === kel);
   const sel = document.getElementById('sel-rw');
-  const rws = getUnique(filtered, 'rw');
-  sel.innerHTML = '<option value="">— Pilih RW —</option>' +
-    rws.map(r => `<option value="${r}">RW ${r}</option>`).join('');
-  document.getElementById('sel-rt').innerHTML = '<option value="">— Pilih RT —</option>';
-  document.getElementById('selected-wilayah-id').value = '';
+  resetWilayahSelection('kelurahan');
+  if (!kec || !kel) return;
+  setSelectLoading(sel);
+  try {
+    const rws = await fetchWilayahOptions('rw', { kecamatan: kec, kelurahan: kel });
+    setSelectOptions(sel, '— Pilih RW —', rws, r => `RW ${r}`);
+  } catch (e) {
+    showToast('error', 'Gagal mengambil data RW', e.message);
+    setSelectOptions(sel, '— Pilih RW —', []);
+  }
 }
 
-function onRwChange() {
+async function onRwChange() {
   const kec = document.getElementById('sel-kecamatan').value;
   const kel = document.getElementById('sel-kelurahan').value;
   const rw = document.getElementById('sel-rw').value;
-  const filtered = wilayahData.filter(w =>
-    w.kecamatan === kec && w.kelurahan === kel && w.rw === rw
-  );
   const sel = document.getElementById('sel-rt');
-  const rts = getUnique(filtered, 'rt');
-  sel.innerHTML = '<option value="">— Pilih RT —</option>' +
-    rts.map(r => `<option value="${r}">RT ${r}</option>`).join('');
-  document.getElementById('selected-wilayah-id').value = '';
+  resetWilayahSelection('rw');
+  if (!kec || !kel || !rw) return;
+  setSelectLoading(sel);
+  try {
+    const rts = await fetchWilayahOptions('rt', { kecamatan: kec, kelurahan: kel, rw });
+    setSelectOptions(sel, '— Pilih RT —', rts, r => `RT ${r}`);
+  } catch (e) {
+    showToast('error', 'Gagal mengambil data RT', e.message);
+    setSelectOptions(sel, '— Pilih RT —', []);
+  }
 }
 
-function onRtChange() {
+async function onRtChange() {
   const kec = document.getElementById('sel-kecamatan').value;
   const kel = document.getElementById('sel-kelurahan').value;
   const rw = document.getElementById('sel-rw').value;
   const rt = document.getElementById('sel-rt').value;
-  const found = wilayahData.find(w =>
-    w.kecamatan === kec && w.kelurahan === kel && w.rw === rw && w.rt === rt
-  );
-  if (found) {
+  document.getElementById('selected-wilayah-id').value = '';
+  if (!kec || !kel || !rw || !rt) return;
+
+  const params = new URLSearchParams({ kecamatan: kec, kelurahan: kel, rw, rt });
+  try {
+    const res = await fetch(`${API_BASE}/wilayah/lookup?${params.toString()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const found = await res.json();
     document.getElementById('selected-wilayah-id').value = found.id_wilayah;
     document.getElementById('wilayah-preview').innerHTML =
       `<span style="color:var(--accent-teal);">✓ ${found.id_wilayah}</span> &nbsp; RT ${rt} / RW ${rw} &nbsp;·&nbsp; ${kel} &nbsp;·&nbsp; ${kec}`;
+  } catch (e) {
+    showToast('error', 'Gagal mengambil data wilayah', e.message);
   }
 }
 
@@ -191,7 +246,7 @@ async function submitSurvey(e) {
 
     const data = await res.json();
     showToast('success', 'Data diterima!',
-      `Event ID: ${data.event_id?.slice(0, 8)}... — Pipeline sedang berjalan, peta akan diperbarui otomatis.`);
+      `Event ID: ${data.event_id?.slice(0, 8)}... — Pipeline akan berjalan otomatis setelah data masuk Bronze.`);
 
     // Show success banner
     const banner = document.getElementById('success-banner');
@@ -203,7 +258,7 @@ async function submitSurvey(e) {
             <div style="font-weight:600;color:var(--text-primary);">Data berhasil dikirim!</div>
             <div style="font-size:0.8125rem;color:var(--text-secondary);">
               Event ID: <code style="font-family:monospace;color:var(--accent-teal);">${data.event_id}</code><br>
-              Pipeline Spark sedang berjalan. Peta akan diperbarui otomatis dalam ~30 detik.
+              Pipeline Spark akan berjalan otomatis dan peta diperbarui setelah proses selesai.
             </div>
           </div>
           <a href="/" class="btn btn-sm btn-secondary" style="margin-left:auto;">🗺️ Lihat Peta</a>

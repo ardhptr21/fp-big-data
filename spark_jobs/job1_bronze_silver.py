@@ -16,11 +16,20 @@ from pyspark.sql.types import FloatType, StringType, IntegerType
 from delta import configure_spark_with_delta_pip
 
 HDFS_URL = os.environ.get("HDFS_URL", "hdfs://namenode:9000")
-# Use local[*] for in-process execution; remote spark only if explicitly set
-SPARK_MASTER = os.environ.get("SPARK_MASTER", "local[*]")
+try:
+    SPARK_LOCAL_THREADS = max(1, int(os.environ.get("SPARK_LOCAL_THREADS", "1")))
+except ValueError:
+    SPARK_LOCAL_THREADS = 1
+
+# Use bounded local mode for in-process execution on lower-memory machines.
+SPARK_MASTER = os.environ.get("SPARK_MASTER", f"local[{SPARK_LOCAL_THREADS}]")
 # For running from API container, use local mode to avoid driver hostname issues
 if SPARK_MASTER.startswith("spark://"):
-    SPARK_MASTER = "local[*]"  # override to local for subprocess execution
+    SPARK_MASTER = f"local[{SPARK_LOCAL_THREADS}]"  # override to local for subprocess execution
+
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
+SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "768m")
+SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
 
 BRONZE_SURVEY = f"{HDFS_URL}/data/bronze/survey_events"
 BRONZE_MASTER = f"{HDFS_URL}/data/bronze/master_wilayah"
@@ -42,8 +51,14 @@ def create_spark():
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.hadoop.fs.defaultFS", HDFS_URL)
         .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
-        .config("spark.driver.memory", "1g")
-        .config("spark.executor.memory", "1g")
+        .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
+        .config("spark.executor.memory", SPARK_EXECUTOR_MEMORY)
+        .config("spark.driver.maxResultSize", "128m")
+        .config("spark.sql.shuffle.partitions", SPARK_SHUFFLE_PARTITIONS)
+        .config("spark.default.parallelism", SPARK_LOCAL_THREADS)
+        .config("spark.python.worker.memory", "256m")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
     )
     return configure_spark_with_delta_pip(builder).getOrCreate()
 
@@ -119,13 +134,16 @@ def main():
                        .withColumnRenamed("risk_level", "risk_level_saat_itu")
 
     # --------------------------------------------------------
-    # Silver/event_history — FULL HISTORY, append-only
+    # Silver/event_history — logical full history from append-only Bronze.
+    # Rebuild instead of appending all Bronze rows every run, otherwise each
+    # pipeline duplicates prior events and grows Silver quadratically.
     # --------------------------------------------------------
-    print("Writing silver/event_history (append)...")
-    enriched.write \
+    print("Writing silver/event_history (deduplicated overwrite)...")
+    history_df = enriched.dropDuplicates(["event_id"])
+    history_df.write \
         .format("delta") \
-        .mode("append") \
-        .option("mergeSchema", "true") \
+        .mode("overwrite") \
+        .option("overwriteSchema", "true") \
         .partitionBy("kelurahan") \
         .save(SILVER_HISTORY)
 

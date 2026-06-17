@@ -89,6 +89,8 @@ services:
   spark:
     image: apache/spark:3.5.0
     container_name: slum_spark_master
+    profiles:
+      - spark-standalone
     hostname: spark
     user: root
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
@@ -107,11 +109,13 @@ services:
   spark-worker:
     image: apache/spark:3.5.0
     container_name: slum_spark_worker
+    profiles:
+      - spark-standalone
     user: root
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark:7077"]
     environment:
-      SPARK_WORKER_MEMORY: "2g"
-      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: "1g"
+      SPARK_WORKER_CORES: "1"
       SPARK_WORKER_WEBUI_PORT: "8081"
     volumes:
       - ./spark_jobs:/opt/spark_jobs
@@ -135,7 +139,11 @@ services:
       - KAFKA_TOPIC_SECONDARY=secondary-batch
       - HDFS_URL=hdfs://namenode:9000
       - API_URL=http://api:8000
-      - SPARK_MASTER=spark://spark:7077
+      - SPARK_MASTER=local[1]
+      - SPARK_LOCAL_THREADS=1
+      - SPARK_DRIVER_MEMORY=768m
+      - SPARK_EXECUTOR_MEMORY=768m
+      - SPARK_SHUFFLE_PARTITIONS=4
     volumes:
       - ./spark_jobs:/opt/spark_jobs
     depends_on:
@@ -162,8 +170,13 @@ services:
       - KAFKA_BOOTSTRAP=kafka:9092
       - KAFKA_TOPIC_SURVEY=survey-events
       - KAFKA_TOPIC_SECONDARY=secondary-batch
-      - SPARK_MASTER=spark://spark:7077
+      - SPARK_MASTER=local[1]
       - SPARK_JOBS_PATH=/opt/spark_jobs
+      - SPARK_LOCAL_THREADS=1
+      - SPARK_DRIVER_MEMORY=768m
+      - SPARK_EXECUTOR_MEMORY=768m
+      - SPARK_SHUFFLE_PARTITIONS=4
+      - PIPELINE_DEBOUNCE_SECONDS=15
     volumes:
       - ./spark_jobs:/opt/spark_jobs
       - ./init_scripts:/init_scripts

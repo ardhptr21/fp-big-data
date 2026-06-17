@@ -32,10 +32,7 @@ logs:
 
 # Seed initial data
 seed:
-	docker run --rm --network fp-big-data_slum_net \
-		-e API_URL=http://api:8000 \
-		-v $(PWD)/init_scripts:/init_scripts \
-		python:3.11-slim \
+	docker compose exec -T -e API_URL=http://localhost:8000 api \
 		python /init_scripts/seed_wilayah.py
 
 # Initialize HDFS

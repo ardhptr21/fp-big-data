@@ -20,9 +20,28 @@ from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 from delta import configure_spark_with_delta_pip
 
 HDFS_URL = os.environ.get("HDFS_URL", "hdfs://namenode:9000")
-SPARK_MASTER = os.environ.get("SPARK_MASTER", "local[*]")
+try:
+    SPARK_LOCAL_THREADS = max(1, int(os.environ.get("SPARK_LOCAL_THREADS", "1")))
+except ValueError:
+    SPARK_LOCAL_THREADS = 1
+
+SPARK_MASTER = os.environ.get("SPARK_MASTER", f"local[{SPARK_LOCAL_THREADS}]")
 if SPARK_MASTER.startswith("spark://"):
-    SPARK_MASTER = "local[*]"
+    SPARK_MASTER = f"local[{SPARK_LOCAL_THREADS}]"
+
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
+SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "768m")
+SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
+
+try:
+    RF_NUM_TREES = max(1, int(os.environ.get("RF_NUM_TREES", "20")))
+except ValueError:
+    RF_NUM_TREES = 20
+
+try:
+    RF_MAX_DEPTH = max(1, int(os.environ.get("RF_MAX_DEPTH", "4")))
+except ValueError:
+    RF_MAX_DEPTH = 4
 
 SILVER_FEATURE = f"{HDFS_URL}/data/silver/feature_matrix"
 SILVER_GT = f"{HDFS_URL}/data/silver/ground_truth"
@@ -39,8 +58,14 @@ def create_spark():
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.hadoop.fs.defaultFS", HDFS_URL)
         .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
-        .config("spark.driver.memory", "2g")
-        .config("spark.executor.memory", "2g")
+        .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
+        .config("spark.executor.memory", SPARK_EXECUTOR_MEMORY)
+        .config("spark.driver.maxResultSize", "128m")
+        .config("spark.sql.shuffle.partitions", SPARK_SHUFFLE_PARTITIONS)
+        .config("spark.default.parallelism", SPARK_LOCAL_THREADS)
+        .config("spark.python.worker.memory", "256m")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
     )
     return configure_spark_with_delta_pip(builder).getOrCreate()
 
@@ -120,8 +145,8 @@ def main():
     rf = RandomForestClassifier(
         labelCol="label",
         featuresCol="features",
-        numTrees=50,
-        maxDepth=5,
+        numTrees=RF_NUM_TREES,
+        maxDepth=RF_MAX_DEPTH,
         seed=42
     )
 
