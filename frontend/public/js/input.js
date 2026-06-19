@@ -244,7 +244,6 @@ async function submitSurvey(e) {
     title: 'Mengirim survei',
     message: 'Mengirim data survei ke server...',
     affectedIds: [id_wilayah],
-    redirectTo: '/',
     progress: 6,
   });
 
@@ -264,7 +263,6 @@ async function submitSurvey(e) {
     window.pipelineStatus?.awaitCompletion({
       title: 'Memproses survei',
       affectedIds: [id_wilayah],
-      redirectTo: '/',
       submittedAt: data.recorded_at,
     });
 

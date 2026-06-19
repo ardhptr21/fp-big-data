@@ -71,8 +71,7 @@
       overlay = createNode('div', 'pipeline-progress-overlay', {
         id: 'pipeline-progress-overlay',
         hidden: '',
-        role: 'dialog',
-        'aria-modal': 'true',
+        role: 'status',
         'aria-live': 'polite',
       });
       overlay.innerHTML = `
@@ -220,19 +219,22 @@
     const pipeline = detail?.pipeline || latestPipeline;
     const version = Number(pipeline?.version || 0);
     if (version <= watch.startVersion || !isFreshCompletion(pipeline)) return;
+    const redirectTo = watch.redirectTo;
     localOverlay = {
       title: watch.title || 'Pembaruan selesai',
-      message: 'Data siap ditampilkan. Membuka peta terbaru...',
+      message: redirectTo
+        ? 'Data siap ditampilkan. Membuka peta terbaru...'
+        : 'Data selesai diproses dan hasil terbaru sudah tersedia.',
       progress: 100,
       state: 'completed',
     };
     render();
-    const redirectTo = watch.redirectTo;
     watch = null;
-    window.setTimeout(() => {
-      if (redirectTo) window.location.assign(redirectTo);
-      else clearWatch();
-    }, 900);
+    if (redirectTo) {
+      window.setTimeout(() => {
+        window.location.assign(redirectTo);
+      }, 900);
+    }
   }
 
   function failWatch(detail) {

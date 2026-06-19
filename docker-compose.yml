@@ -216,6 +216,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: slum_frontend
+    volumes:
+      - ./frontend/public:/usr/share/nginx/html
     ports:
       - "3000:80"
     depends_on:

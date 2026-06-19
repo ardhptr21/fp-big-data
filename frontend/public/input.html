@@ -131,7 +131,7 @@
 
             <!-- Indikator 1: Bangunan -->
             <div class="indicator-group">
-              <div class="indicator-label">Kondisi Bangunan</div>
+              <div class="indicator-label">Kondisi Bangunan <i class="info-icon" onclick="showInfoModal('bangunan')">i</i></div>
               <div class="radio-options">
                 <input type="radio" name="skor_bangunan" id="bang0" value="0" class="radio-option opt-0">
                 <label for="bang0" class="radio-label opt-0-lbl" title="Baik">0</label>
@@ -147,7 +147,7 @@
 
             <!-- Indikator 2: Jalan -->
             <div class="indicator-group">
-              <div class="indicator-label">Aksesibilitas Jalan</div>
+              <div class="indicator-label">Aksesibilitas Jalan <i class="info-icon" onclick="showInfoModal('jalan')">i</i></div>
               <div class="radio-options">
                 <input type="radio" name="skor_jalan" id="jln0" value="0" class="radio-option opt-0">
                 <label for="jln0" class="radio-label opt-0-lbl">0</label>
@@ -162,7 +162,7 @@
 
             <!-- Indikator 3: Drainase -->
             <div class="indicator-group">
-              <div class="indicator-label">Drainase Lingkungan</div>
+              <div class="indicator-label">Drainase Lingkungan <i class="info-icon" onclick="showInfoModal('drainase')">i</i></div>
               <div class="radio-options">
                 <input type="radio" name="skor_drainase" id="dra0" value="0" class="radio-option opt-0">
                 <label for="dra0" class="radio-label opt-0-lbl">0</label>
@@ -177,7 +177,7 @@
 
             <!-- Indikator 4: Air Limbah -->
             <div class="indicator-group">
-              <div class="indicator-label">Pengelolaan Air Limbah</div>
+              <div class="indicator-label">Pengelolaan Air Limbah <i class="info-icon" onclick="showInfoModal('air_limbah')">i</i></div>
               <div class="radio-options">
                 <input type="radio" name="skor_air_limbah" id="alm0" value="0" class="radio-option opt-0">
                 <label for="alm0" class="radio-label opt-0-lbl">0</label>
@@ -192,7 +192,7 @@
 
             <!-- Indikator 5: Sampah -->
             <div class="indicator-group">
-              <div class="indicator-label">Pengelolaan Persampahan</div>
+              <div class="indicator-label">Pengelolaan Persampahan <i class="info-icon" onclick="showInfoModal('sampah')">i</i></div>
               <div class="radio-options">
                 <input type="radio" name="skor_sampah" id="smp0" value="0" class="radio-option opt-0">
                 <label for="smp0" class="radio-label opt-0-lbl">0</label>
@@ -207,7 +207,7 @@
 
             <!-- Indikator 6: Kebakaran -->
             <div class="indicator-group">
-              <div class="indicator-label">Proteksi Kebakaran</div>
+              <div class="indicator-label">Proteksi Kebakaran <i class="info-icon" onclick="showInfoModal('kebakaran')">i</i></div>
               <div class="radio-options">
                 <input type="radio" name="skor_kebakaran" id="kb0" value="0" class="radio-option opt-0">
                 <label for="kb0" class="radio-label opt-0-lbl">0</label>
@@ -222,7 +222,7 @@
 
             <!-- Indikator 7: Air Minum -->
             <div class="indicator-group">
-              <div class="indicator-label">Penyediaan Air Minum</div>
+              <div class="indicator-label">Penyediaan Air Minum <i class="info-icon" onclick="showInfoModal('air_minum')">i</i></div>
               <div class="radio-options">
                 <input type="radio" name="skor_air_minum" id="am0" value="0" class="radio-option opt-0">
                 <label for="am0" class="radio-label opt-0-lbl">0</label>
@@ -387,6 +387,68 @@ document.getElementById('upload-form').addEventListener('submit', async (e) => {
     btn.innerHTML = 'Unggah';
   }
 });
+</script>
+
+<!-- Info Modal -->
+<div id="info-modal" class="modal-overlay" onclick="if(event.target===this) closeInfoModal()">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3 class="modal-title" id="info-modal-title">Info Indikator</h3>
+      <button type="button" class="close-btn" onclick="closeInfoModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="info-modal-body">
+    </div>
+  </div>
+</div>
+
+<script>
+const indicatorInfo = {
+  bangunan: {
+    title: 'Kondisi Bangunan',
+    desc: '<ul><li><span>0:</span> Kondisi bangunan baik dan sesuai standar</li><li><span>1:</span> Sebagian kecil bangunan mengalami kerusakan</li><li><span>2:</span> Mayoritas bangunan mengalami kerusakan</li><li><span>3:</span> Bangunan tidak layak huni/sangat kumuh</li></ul>'
+  },
+  jalan: {
+    title: 'Aksesibilitas Jalan',
+    desc: '<ul><li><span>0:</span> Jalan baik dan lebar sesuai standar</li><li><span>1:</span> Jalan sebagian rusak atau agak sempit</li><li><span>2:</span> Jalan mayoritas rusak dan sempit</li><li><span>3:</span> Jalan tidak bisa dilewati/sangat rusak</li></ul>'
+  },
+  drainase: {
+    title: 'Drainase Lingkungan',
+    desc: '<ul><li><span>0:</span> Drainase lancar, tidak ada genangan</li><li><span>1:</span> Drainase sebagian tersumbat, kadang tergenang</li><li><span>2:</span> Drainase rusak, sering tergenang air</li><li><span>3:</span> Tidak ada drainase/selalu banjir</li></ul>'
+  },
+  air_limbah: {
+    title: 'Pengelolaan Air Limbah',
+    desc: '<ul><li><span>0:</span> Sistem air limbah sesuai standar (septic tank baik)</li><li><span>1:</span> Sebagian sistem tidak sesuai standar</li><li><span>2:</span> Mayoritas limbah dibuang langsung ke lingkungan</li><li><span>3:</span> Tidak ada pengelolaan air limbah sama sekali</li></ul>'
+  },
+  sampah: {
+    title: 'Pengelolaan Persampahan',
+    desc: '<ul><li><span>0:</span> Sampah terangkut rutin, TPS memadai</li><li><span>1:</span> Pengangkutan tidak rutin, kadang menumpuk</li><li><span>2:</span> Sampah sering berserakan, TPS kurang</li><li><span>3:</span> Tidak ada pengelolaan/pengangkutan sampah</li></ul>'
+  },
+  kebakaran: {
+    title: 'Proteksi Kebakaran',
+    desc: '<ul><li><span>0:</span> Tersedia alat pemadam dan akses jalan baik</li><li><span>1:</span> Alat terbatas atau akses pemadam cukup sulit</li><li><span>2:</span> Tidak ada alat pemadam dan akses sangat sulit</li><li><span>3:</span> Sangat rawan kebakaran dan tidak ada akses</li></ul>'
+  },
+  air_minum: {
+    title: 'Penyediaan Air Minum',
+    desc: '<ul><li><span>0:</span> Akses air bersih 100% perpipaan/layak</li><li><span>1:</span> Akses air bersih layak namun terbatas</li><li><span>2:</span> Mayoritas menggunakan air tidak layak</li><li><span>3:</span> Tidak ada akses air minum sama sekali</li></ul>'
+  }
+};
+
+function showInfoModal(key) {
+  const modal = document.getElementById('info-modal');
+  const title = document.getElementById('info-modal-title');
+  const body = document.getElementById('info-modal-body');
+  
+  if(indicatorInfo[key]) {
+    title.innerText = indicatorInfo[key].title;
+    body.innerHTML = indicatorInfo[key].desc;
+  }
+  
+  modal.style.display = 'flex';
+}
+
+function closeInfoModal() {
+  document.getElementById('info-modal').style.display = 'none';
+}
 </script>
 </body>
 </html>

@@ -28,6 +28,56 @@
       background: var(--bg-primary);
     }
 
+    .map-picker-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .map-picker-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    .map-picker-frame {
+      position: relative;
+    }
+
+    .map-picker-frame.is-fullscreen {
+      position: fixed;
+      inset: 0;
+      z-index: 2600;
+      background: var(--overlay-backdrop);
+      backdrop-filter: blur(4px);
+      padding: 1rem;
+      display: flex;
+      align-items: stretch;
+      justify-content: stretch;
+    }
+
+    .map-picker-frame.is-fullscreen #mini-map {
+      height: 100%;
+      width: 100%;
+      border-radius: 8px;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .map-picker-floating-actions {
+      position: absolute;
+      top: 0.75rem;
+      right: 0.75rem;
+      z-index: 700;
+      display: none;
+      gap: 0.5rem;
+    }
+
+    .map-picker-frame.is-fullscreen .map-picker-floating-actions {
+      display: flex;
+    }
+
     .form-grid-3 {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -36,6 +86,9 @@
 
     @media (max-width: 768px) {
       .form-grid-3 { grid-template-columns: 1fr; }
+      .map-picker-frame.is-fullscreen {
+        padding: 0.75rem;
+      }
     }
   </style>
 </head>
@@ -130,8 +183,18 @@
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">
             <!-- Mini Map -->
             <div>
-              <div class="form-label" style="margin-bottom:0.5rem;">Klik peta untuk membuat kotak wilayah</div>
-              <div id="mini-map"></div>
+              <div class="map-picker-shell">
+                <div class="map-picker-actions">
+                  <div class="form-label" style="margin:0;">Klik peta untuk membuat kotak wilayah</div>
+                  <button type="button" class="btn btn-secondary btn-sm" id="map-expand-btn">Perbesar Peta</button>
+                </div>
+                <div class="map-picker-frame" id="map-picker-frame">
+                  <div id="mini-map"></div>
+                  <div class="map-picker-floating-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" id="map-close-btn">Tutup</button>
+                  </div>
+                </div>
+              </div>
               <div id="map-coords" style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem;">
                 Klik pada peta untuk membuat area RT/RW
               </div>
@@ -217,8 +280,60 @@ let miniMapTileLayer = L.tileLayer(miniMapTileUrl(), {
   attribution: '© CARTO', subdomains: 'abcd'
 }).addTo(miniMap);
 
+let registeredWilayah = [];
 let geometryPreview = null;
 let selectedLatLng = null;
+const mapPickerFrame = document.getElementById('map-picker-frame');
+const mapExpandBtn = document.getElementById('map-expand-btn');
+const mapCloseBtn = document.getElementById('map-close-btn');
+let mapPickerFullscreen = false;
+let autoIdentifiedFromForm = false;
+let autoIdentifyTimer = null;
+let geocodeRequestId = 0;
+
+function normalizeText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function parseGeoJSON(value) {
+  if (!value) return null;
+  try {
+    return typeof value === 'string' ? JSON.parse(value) : value;
+  } catch {
+    return null;
+  }
+}
+
+function geometryToBounds(geometry) {
+  if (!geometry || !geometry.coordinates) return null;
+  try {
+    return L.geoJSON(geometry).getBounds();
+  } catch {
+    return null;
+  }
+}
+
+function syncMiniMapSize() {
+  window.setTimeout(() => {
+    miniMap.invalidateSize();
+    if (geometryPreview) {
+      miniMap.fitBounds(geometryPreview.getBounds(), { padding: [24, 24], maxZoom: 16 });
+    } else if (selectedLatLng) {
+      miniMap.setView([selectedLatLng.lat, selectedLatLng.lng], Math.max(miniMap.getZoom(), 15));
+    } else {
+      miniMap.setView([-7.2575, 112.7521], 12);
+    }
+  }, 80);
+}
+
+function setMapPickerFullscreen(enabled) {
+  mapPickerFullscreen = Boolean(enabled);
+  mapPickerFrame.classList.toggle('is-fullscreen', mapPickerFullscreen);
+  mapExpandBtn.textContent = mapPickerFullscreen ? 'Peta Aktif' : 'Perbesar Peta';
+  mapExpandBtn.disabled = mapPickerFullscreen;
+  document.body.style.overflow = mapPickerFullscreen ? 'hidden' : '';
+  syncMiniMapSize();
+}
 
 function buildBoxGeometry(lng, lat) {
   const area = parseFloat(document.getElementById('luas_m2').value || '0');
@@ -257,6 +372,131 @@ function setGeometryFromMap(lat, lng) {
   document.getElementById('map-coords').textContent = `Area sekitar: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 }
 
+function findBestWilayahMatch() {
+  const kecamatan = normalizeText(document.getElementById('kecamatan').value);
+  const kelurahan = normalizeText(document.getElementById('kelurahan').value);
+  const rw = normalizeText(document.getElementById('rw').value);
+  const rt = normalizeText(document.getElementById('rt').value);
+
+  if (!kecamatan && !kelurahan) return null;
+
+  const scored = registeredWilayah
+    .map(w => {
+      const geometry = parseGeoJSON(w.geometry_wkt);
+      const bounds = geometryToBounds(geometry);
+      if (!bounds) return null;
+
+      let score = 0;
+      if (kecamatan && normalizeText(w.kecamatan) === kecamatan) score += 2;
+      if (kelurahan && normalizeText(w.kelurahan) === kelurahan) score += 4;
+      if (rw && normalizeText(w.rw) === rw) score += 3;
+      if (rt && normalizeText(w.rt) === rt) score += 5;
+      return score > 0 ? { wilayah: w, bounds, score } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+
+  return scored[0] || null;
+}
+
+function autoIdentifyMapFromForm() {
+  if (selectedLatLng && !autoIdentifiedFromForm) return;
+
+  const match = findBestWilayahMatch();
+  if (!match) return;
+
+  const center = match.bounds.getCenter();
+  autoIdentifiedFromForm = true;
+  selectedLatLng = { lat: center.lat, lng: center.lng };
+  miniMap.fitBounds(match.bounds.pad(0.35), { maxZoom: 16, padding: [24, 24] });
+  setGeometryFromMap(center.lat, center.lng);
+  document.getElementById('map-coords').textContent =
+    `Lokasi teridentifikasi dari wilayah terdekat: RT ${match.wilayah.rt} / RW ${match.wilayah.rw} - ${match.wilayah.kelurahan} - ${match.wilayah.kecamatan}`;
+}
+
+async function geocodeWilayahFromForm() {
+  const kecamatan = document.getElementById('kecamatan').value.trim();
+  const kelurahan = document.getElementById('kelurahan').value.trim();
+  const rw = document.getElementById('rw').value.trim();
+  const rt = document.getElementById('rt').value.trim();
+
+  if (!kecamatan || !kelurahan) return false;
+
+  const requestId = ++geocodeRequestId;
+  const query = [
+    rt ? `RT ${rt}` : '',
+    rw ? `RW ${rw}` : '',
+    kelurahan,
+    kecamatan,
+    'Surabaya',
+    'Jawa Timur',
+    'Indonesia',
+  ].filter(Boolean).join(', ');
+
+  document.getElementById('map-coords').textContent = 'Mencari lokasi wilayah...';
+
+  try {
+    const url = new URL('https://nominatim.openstreetmap.org/search');
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('limit', '1');
+    url.searchParams.set('polygon_geojson', '0');
+    url.searchParams.set('q', query);
+
+    const res = await fetch(url.toString(), {
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    const rows = await res.json();
+    if (requestId !== geocodeRequestId) return false;
+    if (!Array.isArray(rows) || rows.length === 0) return false;
+
+    const row = rows[0];
+    const lat = parseFloat(row.lat);
+    const lng = parseFloat(row.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+
+    autoIdentifiedFromForm = true;
+    selectedLatLng = { lat, lng };
+    miniMap.setView([lat, lng], 15);
+    setGeometryFromMap(lat, lng);
+    document.getElementById('map-coords').textContent =
+      `Lokasi teridentifikasi otomatis: ${kelurahan}, ${kecamatan}, Surabaya`;
+    return true;
+  } catch (error) {
+    if (requestId === geocodeRequestId) {
+      console.warn('Geocoding wilayah gagal:', error);
+    }
+    return false;
+  }
+}
+
+function scheduleAutoIdentifyFromForm() {
+  if (selectedLatLng && !autoIdentifiedFromForm) return;
+
+  if (autoIdentifyTimer) {
+    clearTimeout(autoIdentifyTimer);
+    autoIdentifyTimer = null;
+  }
+
+  autoIdentifyTimer = window.setTimeout(async () => {
+    autoIdentifyTimer = null;
+    const localMatched = findBestWilayahMatch();
+    if (localMatched) {
+      autoIdentifyMapFromForm();
+      return;
+    }
+
+    const found = await geocodeWilayahFromForm();
+    if (!found && !selectedLatLng) {
+      document.getElementById('map-coords').textContent =
+        'Lokasi belum dapat diidentifikasi otomatis. Klik peta untuk memilih area RT/RW.';
+    }
+  }, 450);
+}
+
 window.addEventListener('themechange', () => {
   miniMap.removeLayer(miniMapTileLayer);
   miniMapTileLayer = L.tileLayer(miniMapTileUrl(), {
@@ -270,7 +510,17 @@ window.addEventListener('themechange', () => {
 
 miniMap.on('click', (e) => {
   const {lat, lng} = e.latlng;
+  autoIdentifiedFromForm = false;
   setGeometryFromMap(lat, lng);
+});
+
+mapExpandBtn.addEventListener('click', () => setMapPickerFullscreen(true));
+mapCloseBtn.addEventListener('click', () => setMapPickerFullscreen(false));
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && mapPickerFullscreen) {
+    setMapPickerFullscreen(false);
+  }
 });
 
 document.getElementById('luas_m2').addEventListener('input', () => {
@@ -292,6 +542,7 @@ function buildId() {
 ['kecamatan','kelurahan','rw','rt'].forEach(id => {
   document.getElementById(id)?.addEventListener('input', () => {
     document.getElementById('id-preview').textContent = buildId();
+    scheduleAutoIdentifyFromForm();
   });
 });
 
@@ -359,6 +610,7 @@ async function loadWilayahList() {
   try {
     const applyWilayahList = data => {
       const list = data.wilayah || [];
+      registeredWilayah = list;
       document.getElementById('wilayah-count').textContent = `${list.length} wilayah terdaftar`;
       const tbody = document.getElementById('wilayah-list-body');
       if (list.length === 0) {
@@ -378,8 +630,9 @@ async function loadWilayahList() {
           </td>
         </tr>
       `).join('');
+      scheduleAutoIdentifyFromForm();
     };
-    const data = await getJSON(`${API_BASE}/wilayah`, {
+    const data = await getJSON(`${API_BASE}/wilayah?limit=5000`, {
       ttl: 5 * 60 * 1000,
       staleTtl: 24 * 60 * 60 * 1000,
       onUpdate: applyWilayahList,
@@ -394,8 +647,17 @@ function resetForm() {
   document.getElementById('id-preview').textContent = '--';
   document.getElementById('register-result').innerHTML = '';
   if (geometryPreview) { geometryPreview.remove(); geometryPreview = null; }
+  registeredWilayah = registeredWilayah || [];
   selectedLatLng = null;
+  autoIdentifiedFromForm = false;
+  geocodeRequestId += 1;
+  if (autoIdentifyTimer) {
+    clearTimeout(autoIdentifyTimer);
+    autoIdentifyTimer = null;
+  }
+  setMapPickerFullscreen(false);
   document.getElementById('map-coords').textContent = 'Klik pada peta untuk membuat area RT/RW';
+  miniMap.setView([-7.2575, 112.7521], 12);
 }
 
 function showToast(type, title, msg, duration = 4000) {
