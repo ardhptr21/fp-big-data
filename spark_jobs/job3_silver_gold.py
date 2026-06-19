@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
 Spark Job 3: Silver + Model -> Gold
-Produces all analytics outputs:
-- gold/slum_risk_score      : risk score per wilayah + kelurahan
-- gold/slum_prediction      : ML prediction labels
-- gold/slum_trend           : delta skor antar events
-- gold/dominant_factors     : top-3 faktor per kelurahan
-- gold/intervention_priority: ranking prioritas intervensi
+Menghasilkan semua output analitik:
+- gold/slum_risk_score        : risk score per wilayah + kelurahan
+- gold/slum_prediction        : ML prediction labels + probabilitas
+- gold/slum_trend             : delta skor antar events (temporal trend)
+- gold/dominant_factors       : top-3 faktor per kelurahan
+- gold/intervention_priority  : ranking prioritas intervensi
+- gold/slum_clusters   [NEW]  : K-Means clustering wilayah berdasarkan 7 indikator PUPR
+- gold/slum_forecast   [NEW]  : Prediksi risk_score 30 hari ke depan (linear regression)
+
+Teknik analisis lanjutan:
+  1. RandomForestClassifier (via Job 2 model)         — klasifikasi kumuh
+  2. K-Means Clustering (Spark MLlib, K=4)            — pengelompokan spasial wilayah
+  3. Linear Regression Forecasting (window functions) — prediksi risk score T+30 hari
 """
 
 import glob
+import math
 import os
 import sys
 import time
@@ -19,7 +27,7 @@ from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
-from pyspark.sql.types import FloatType, IntegerType
+from pyspark.sql.types import FloatType, IntegerType, StringType
 
 HDFS_URL = os.environ.get("HDFS_URL", "hdfs://namenode:9000")
 STORAGE_MODE = os.environ.get("STORAGE_MODE", "auto").lower()
@@ -49,6 +57,12 @@ try:
 except ValueError:
     HDFS_PROBE_INTERVAL_SECONDS = 2.5
 
+# Jumlah cluster K-Means (sesuai 4 level risiko: Ringan/Sedang/Berat/Sangat Berat)
+KMEANS_K = int(os.environ.get("KMEANS_K", "4"))
+
+# Horizon forecasting dalam hari
+FORECAST_HORIZON_DAYS = int(os.environ.get("FORECAST_HORIZON_DAYS", "30"))
+
 LAKEHOUSE_ROOT = None
 STORAGE_BACKEND = "unresolved"
 
@@ -62,6 +76,8 @@ GOLD_PREDICTION = None
 GOLD_TREND = None
 GOLD_FACTORS = None
 GOLD_PRIORITY = None
+GOLD_CLUSTERS = None
+GOLD_FORECAST = None
 
 INDICATOR_LABELS = {
     "skor_bangunan": "Kondisi Bangunan",
@@ -72,6 +88,14 @@ INDICATOR_LABELS = {
     "skor_kebakaran": "Proteksi Kebakaran",
     "skor_air_minum": "Penyediaan Air Minum",
 }
+
+# Label cluster berdasarkan rata-rata risk score centroid
+CLUSTER_LEVEL_LABELS = [
+    "Cluster Risiko Rendah",
+    "Cluster Risiko Sedang",
+    "Cluster Risiko Tinggi",
+    "Cluster Risiko Sangat Tinggi",
+]
 
 
 def parse_affected_ids() -> List[str]:
@@ -130,6 +154,7 @@ def configure_lakehouse_paths(spark):
     global LAKEHOUSE_ROOT, STORAGE_BACKEND
     global SILVER_LATEST, SILVER_HISTORY, BRONZE_MASTER, MODELS_LATEST
     global GOLD_RISK, GOLD_PREDICTION, GOLD_TREND, GOLD_FACTORS, GOLD_PRIORITY
+    global GOLD_CLUSTERS, GOLD_FORECAST
 
     if LAKEHOUSE_ROOT:
         return
@@ -165,6 +190,8 @@ def configure_lakehouse_paths(spark):
     GOLD_TREND = f"{root}/gold/slum_trend"
     GOLD_FACTORS = f"{root}/gold/dominant_factors"
     GOLD_PRIORITY = f"{root}/gold/intervention_priority"
+    GOLD_CLUSTERS = f"{root}/gold/slum_clusters"
+    GOLD_FORECAST = f"{root}/gold/slum_forecast"
     print(f"Lakehouse storage backend={STORAGE_BACKEND} root={LAKEHOUSE_ROOT}")
 
 
@@ -318,8 +345,250 @@ def with_top_factors(df):
     )
 
 
+# ===========================================================
+# TEKNIK #2: K-Means Clustering (Spark MLlib)
+# ===========================================================
+def compute_kmeans_clusters(spark, latest_df):
+    """
+    Mengelompokkan wilayah menggunakan K-Means (K=4) berdasarkan 7 indikator PUPR.
+
+    Return:
+        cluster_assignment_df: DataFrame dengan kolom id_wilayah, cluster_id, cluster_label
+        cluster_summary_df:    DataFrame dengan centroid tiap cluster
+    """
+    from pyspark.ml.clustering import KMeans
+    from pyspark.ml.feature import VectorAssembler, StandardScaler
+
+    print(f"=== K-Means Clustering (K={KMEANS_K}) ===")
+
+    feature_cols = [c for c in INDICATOR_LABELS if c in latest_df.columns]
+    if not feature_cols:
+        print("K-Means: No indicator columns found, skipping")
+        return None, None
+
+    kmeans_input = latest_df.select(["id_wilayah", "kelurahan", "kecamatan"] + feature_cols).fillna(0)
+
+    n_rows = kmeans_input.count()
+    if n_rows < KMEANS_K:
+        print(f"K-Means: Hanya {n_rows} wilayah, tidak cukup untuk K={KMEANS_K} — skip clustering")
+        return None, None
+
+    # Assemble + scale fitur
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="_raw_features", handleInvalid="keep")
+    scaler = StandardScaler(inputCol="_raw_features", outputCol="features", withMean=True, withStd=True)
+
+    try:
+        from pyspark.ml import Pipeline as MLPipeline
+        prep_pipeline = MLPipeline(stages=[assembler, scaler])
+        prep_model = prep_pipeline.fit(kmeans_input)
+        scaled_df = prep_model.transform(kmeans_input)
+    except Exception as e:
+        print(f"K-Means scaling failed: {e}; falling back to unscaled features")
+        assembler_only = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="keep")
+        scaled_df = assembler_only.transform(kmeans_input)
+
+    # K-Means
+    kmeans = KMeans(k=KMEANS_K, seed=42, maxIter=20, featuresCol="features", predictionCol="cluster_id")
+    kmeans_model = kmeans.fit(scaled_df)
+    clustered_df = kmeans_model.transform(scaled_df)
+
+    # Hitung rata-rata risk_score per cluster untuk labeling
+    if "risk_score" not in clustered_df.columns:
+        clustered_df = compute_risk_score_df(clustered_df)
+
+    cluster_stats = (
+        clustered_df.groupBy("cluster_id")
+        .agg(
+            F.avg("risk_score").alias("avg_risk_score"),
+            F.count("id_wilayah").alias("jumlah_wilayah"),
+        )
+        .orderBy("avg_risk_score")
+    )
+
+    # Beri label cluster sesuai urutan risk_score (ascending → Rendah dulu)
+    cluster_stats_rows = cluster_stats.collect()
+    cluster_label_map = {}
+    for rank, row in enumerate(cluster_stats_rows):
+        label_idx = min(rank, len(CLUSTER_LEVEL_LABELS) - 1)
+        cluster_label_map[int(row["cluster_id"])] = CLUSTER_LEVEL_LABELS[label_idx]
+
+    print(f"K-Means hasil cluster: {cluster_label_map}")
+
+    # UDF untuk map cluster_id → cluster_label
+    @F.udf(StringType())
+    def map_cluster_label(cid):
+        return cluster_label_map.get(int(cid), f"Cluster {cid}")
+
+    cluster_assignment = (
+        clustered_df.select("id_wilayah", "kelurahan", "kecamatan", "cluster_id")
+        .withColumn("cluster_label", map_cluster_label(F.col("cluster_id").cast("int")))
+        .withColumn("computed_at", F.current_timestamp())
+    )
+
+    # Centroid summary untuk gold/slum_clusters
+    centroids = kmeans_model.clusterCenters()
+    centroid_rows = []
+    for i, center in enumerate(centroids):
+        label = cluster_label_map.get(i, f"Cluster {i}")
+        stats_row = next((r for r in cluster_stats_rows if int(r["cluster_id"]) == i), None)
+        centroid_row = {
+            "cluster_id": i,
+            "cluster_label": label,
+            "jumlah_wilayah": int(stats_row["jumlah_wilayah"]) if stats_row else 0,
+            "avg_risk_score": float(stats_row["avg_risk_score"]) if stats_row else 0.0,
+        }
+        # Tambah centroid values per fitur
+        for j, feat in enumerate(feature_cols):
+            centroid_row[f"centroid_{feat}"] = float(center[j]) if j < len(center) else 0.0
+        centroid_rows.append(centroid_row)
+
+    cluster_summary_df = spark.createDataFrame(centroid_rows)
+    cluster_summary_df = cluster_summary_df.withColumn("computed_at", F.current_timestamp())
+
+    print(f"K-Means selesai: {len(centroid_rows)} clusters ditemukan")
+    return cluster_assignment, cluster_summary_df
+
+
+# ===========================================================
+# TEKNIK #3: Linear Regression Forecasting
+# ===========================================================
+def compute_forecast(spark, history_df):
+    """
+    Prediksi risk_score T+30 hari menggunakan regresi linear sederhana.
+
+    Metode:
+    - Konversi recorded_at ke Unix timestamp (detik)
+    - Hitung slope (b1) dan intercept (b0) menggunakan formula OLS:
+        b1 = (Σ(x - x̄)(y - ȳ)) / Σ(x - x̄)²
+        b0 = ȳ - b1 * x̄
+    - Prediksi: forecast_score = b0 + b1 * (now + 30 hari dalam detik)
+
+    Return:
+        forecast_df: DataFrame dengan forecast per wilayah
+    """
+    from pyspark.sql.functions import (
+        unix_timestamp, avg as spark_avg, sum as spark_sum, count as spark_count
+    )
+
+    print(f"=== Linear Regression Forecasting (horizon={FORECAST_HORIZON_DAYS} hari) ===")
+
+    if df_is_empty(history_df):
+        print("Forecast: No history data, skipping")
+        return None
+
+    # Hitung risk_score per event jika belum ada
+    if "risk_score_saat_itu" in history_df.columns:
+        ts_df = history_df.withColumn("risk_score_h", F.col("risk_score_saat_itu").cast(FloatType()))
+    elif "risk_score" in history_df.columns:
+        ts_df = history_df.withColumn("risk_score_h", F.col("risk_score").cast(FloatType()))
+    else:
+        ts_df = compute_risk_score_df(history_df)
+        ts_df = ts_df.withColumn("risk_score_h", F.col("risk_score").cast(FloatType()))
+
+    ts_df = ts_df.withColumn(
+        "ts_unix",
+        unix_timestamp(F.col("recorded_at").cast("timestamp")).cast(FloatType())
+    ).filter(F.col("ts_unix").isNotNull() & F.col("risk_score_h").isNotNull())
+
+    # Minimal 2 titik data per wilayah untuk regresi
+    count_df = ts_df.groupBy("id_wilayah").agg(spark_count("*").alias("n_events"))
+    ts_df = ts_df.join(count_df, on="id_wilayah", how="inner").filter(F.col("n_events") >= 2)
+
+    if df_is_empty(ts_df):
+        print("Forecast: Tidak cukup titik data (min 2 event per wilayah), skipping")
+        return None
+
+    # OLS linear regression per wilayah menggunakan window aggregations
+    # b1 = Cov(x,y) / Var(x) = (n*Σxy - Σx*Σy) / (n*Σx² - (Σx)²)
+    reg_df = ts_df.groupBy("id_wilayah").agg(
+        spark_count("*").alias("n"),
+        spark_sum(F.col("ts_unix") * F.col("risk_score_h")).alias("sum_xy"),
+        spark_sum(F.col("ts_unix")).alias("sum_x"),
+        spark_sum(F.col("risk_score_h")).alias("sum_y"),
+        spark_sum(F.col("ts_unix") * F.col("ts_unix")).alias("sum_x2"),
+        F.max("ts_unix").alias("last_ts"),
+        F.max("risk_score_h").alias("last_risk_score"),
+        spark_avg("risk_score_h").alias("avg_risk_score"),
+    )
+
+    # Hitung slope dan intercept via Spark SQL expressions
+    reg_df = reg_df.withColumn(
+        "denom",
+        F.col("n") * F.col("sum_x2") - F.col("sum_x") * F.col("sum_x")
+    )
+
+    reg_df = reg_df.withColumn(
+        "slope",
+        F.when(F.abs(F.col("denom")) > 1e-6,
+               (F.col("n") * F.col("sum_xy") - F.col("sum_x") * F.col("sum_y")) / F.col("denom")
+        ).otherwise(F.lit(0.0)).cast(FloatType())
+    )
+
+    reg_df = reg_df.withColumn(
+        "intercept",
+        ((F.col("sum_y") - F.col("slope") * F.col("sum_x")) / F.col("n")).cast(FloatType())
+    )
+
+    # Prediksi T+30 hari
+    horizon_secs = float(FORECAST_HORIZON_DAYS * 86400)
+    reg_df = reg_df.withColumn(
+        "forecast_ts",
+        (F.col("last_ts") + F.lit(horizon_secs)).cast(FloatType())
+    )
+
+    reg_df = reg_df.withColumn(
+        "forecast_score_raw",
+        (F.col("intercept") + F.col("slope") * F.col("forecast_ts")).cast(FloatType())
+    )
+
+    # Clamp ke [0, 100]
+    reg_df = reg_df.withColumn(
+        "forecast_score",
+        F.greatest(F.lit(0.0), F.least(F.lit(100.0), F.col("forecast_score_raw"))).cast(FloatType())
+    )
+
+    # Label trend
+    reg_df = reg_df.withColumn(
+        "forecast_trend",
+        F.when(F.col("slope") > 0.5, "Memburuk")
+         .when(F.col("slope") < -0.5, "Membaik")
+         .otherwise("Stabil")
+    )
+
+    # Level forecasting
+    reg_df = reg_df.withColumn(
+        "forecast_risk_level",
+        F.when(F.col("forecast_score") < 25, "Ringan")
+         .when(F.col("forecast_score") < 50, "Sedang")
+         .when(F.col("forecast_score") < 75, "Berat")
+         .otherwise("Sangat Berat")
+    )
+
+    # Tanggal forecast (sebagai string ISO)
+    reg_df = reg_df.withColumn(
+        "forecast_at",
+        F.from_unixtime(F.col("forecast_ts").cast("long")).cast("timestamp")
+    )
+
+    forecast_df = reg_df.select(
+        "id_wilayah",
+        F.col("n").alias("n_history_events"),
+        F.col("last_risk_score").alias("current_risk_score"),
+        "forecast_score",
+        "forecast_at",
+        "forecast_trend",
+        "forecast_risk_level",
+        F.round(F.col("slope") * 86400, 4).alias("slope_per_day"),  # perubahan skor per hari
+        F.current_timestamp().alias("computed_at"),
+    )
+
+    n_forecasted = forecast_df.count()
+    print(f"Forecast selesai: {n_forecasted} wilayah diforecast ({FORECAST_HORIZON_DAYS} hari ke depan)")
+    return forecast_df
+
+
 def main():
-    print("=== Job 3: Silver -> Gold ===")
+    print("=== Job 3: Silver -> Gold (Risk Score + ML + K-Means Clustering + Forecasting) ===")
     spark = create_spark()
     spark.sparkContext.setLogLevel("WARN")
 
@@ -360,7 +629,7 @@ def main():
 
     scored_df = add_risk_level(compute_risk_score_df(latest_scope))
 
-    # ML prediction is mandatory for Gold prediction output.
+    # ML prediction
     try:
         from pyspark.ml import PipelineModel
         from pyspark.ml.functions import vector_to_array
@@ -414,6 +683,23 @@ def main():
         .withColumn("priority_score", F.col("risk_score") * F.col("jiwa_terdampak").cast(FloatType()))
     )
 
+    # =======================================================
+    # TEKNIK #2: K-Means Clustering (selalu full-run)
+    # =======================================================
+    print("Menjalankan K-Means Clustering pada semua wilayah...")
+    all_latest_for_cluster = latest_df if not incremental else latest_df
+    cluster_assignment, cluster_summary = compute_kmeans_clusters(spark, compute_risk_score_df(all_latest_for_cluster))
+
+    if cluster_assignment is not None:
+        # Join cluster_id ke gold_df
+        if "cluster_id" in gold_df.columns:
+            gold_df = gold_df.drop("cluster_id", "cluster_label")
+        cluster_slim = cluster_assignment.select("id_wilayah", "cluster_id", "cluster_label")
+        gold_df = gold_df.join(cluster_slim, on="id_wilayah", how="left")
+    else:
+        gold_df = gold_df.withColumn("cluster_id", F.lit(None).cast(IntegerType()))
+        gold_df = gold_df.withColumn("cluster_label", F.lit(""))
+
     print("Merging gold/slum_risk_score...")
     merge_delta(
         spark,
@@ -434,6 +720,7 @@ def main():
     print("Merging gold/slum_prediction...")
     merge_delta(spark, prediction_df, GOLD_PREDICTION, "t.id_wilayah = s.id_wilayah")
 
+    # Trend
     try:
         history_df = spark.read.format("delta").load(SILVER_HISTORY)
         if incremental:
@@ -478,6 +765,7 @@ def main():
     except Exception as e:
         print(f"Cannot compute trend (need at least one event): {e}")
 
+    # Dominant factors
     factors_df = gold_df.select(
         "id_wilayah",
         "kelurahan",
@@ -492,8 +780,7 @@ def main():
     print("Merging gold/dominant_factors...")
     merge_delta(spark, factors_df, GOLD_FACTORS, "t.id_wilayah = s.id_wilayah")
 
-    # Priority rank is global, so compute it from the merged risk table. It is
-    # still persisted via Delta MERGE instead of rewriting the whole Gold table.
+    # Priority ranking
     current_gold = spark.read.format("delta").load(GOLD_RISK)
     ranked_gold = current_gold.withColumn(
         "priority_score",
@@ -519,12 +806,32 @@ def main():
         "top_faktor_1",
         "top_faktor_2",
         "top_faktor_3",
+        "cluster_id",
+        "cluster_label",
         "last_updated",
     )
     print("Merging gold/intervention_priority...")
     merge_delta(spark, priority_df, GOLD_PRIORITY, "t.id_wilayah = s.id_wilayah")
 
     ranked_gold.unpersist()
+
+    # Simpan cluster summary
+    if cluster_summary is not None:
+        print("Writing gold/slum_clusters...")
+        write_delta(cluster_summary, GOLD_CLUSTERS)
+
+    # =======================================================
+    # TEKNIK #3: Forecasting (selalu full-run dari semua history)
+    # =======================================================
+    try:
+        full_history = spark.read.format("delta").load(SILVER_HISTORY)
+        forecast_df = compute_forecast(spark, full_history)
+        if forecast_df is not None:
+            print("Merging gold/slum_forecast...")
+            merge_delta(spark, forecast_df, GOLD_FORECAST, "t.id_wilayah = s.id_wilayah")
+    except Exception as e:
+        print(f"Forecasting failed (non-critical): {e}")
+
     print("=== Job 3 Complete ===")
     spark.stop()
 

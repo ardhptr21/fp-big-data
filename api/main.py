@@ -66,6 +66,16 @@ try:
 except ValueError:
     PIPELINE_DEBOUNCE_SECONDS = 2.0
 
+try:
+    KMEANS_K = max(2, int(os.environ.get("KMEANS_K", "4")))
+except ValueError:
+    KMEANS_K = 4
+
+try:
+    FORECAST_HORIZON_DAYS = max(1, int(os.environ.get("FORECAST_HORIZON_DAYS", "30")))
+except ValueError:
+    FORECAST_HORIZON_DAYS = 30
+
 FORCE_TRAIN_EVERY_RUN = os.environ.get("FORCE_TRAIN_EVERY_RUN", "false").lower() in {"1", "true", "yes"}
 
 try:
@@ -1261,6 +1271,9 @@ async def get_map_risk_score(
             "top_faktor_3": gold.get("top_faktor_3", ""),
             "last_updated": str(gold.get("last_updated", "")),
             "prioritas_rank": gold.get("prioritas_rank", None),
+            # K-Means Clustering
+            "cluster_id": gold.get("cluster_id", None),
+            "cluster_label": gold.get("cluster_label", ""),
         }
 
         if point and bounds:
@@ -1386,16 +1399,189 @@ async def get_priority():
     return {"priority": sorted_rows, "total": len(sorted_rows)}
 
 
+# ============================================================
+# ROUTES: Clusters (K-Means)
+# ============================================================
+@app.get("/api/clusters")
+async def get_clusters():
+    """
+    Hasil K-Means Clustering (K=4) berdasarkan 7 indikator PUPR.
+    Mengembalikan centroid tiap cluster + jumlah wilayah + rata-rata risk score.
+    Teknik analisis lanjutan #2 (Spatial Clustering).
+    """
+    cluster_path = lakehouse_path("gold/slum_clusters")
+    rows = read_delta(cluster_path)
+    if rows is None:
+        return {"clusters": [], "total": 0, "k": KMEANS_K,
+                "message": "Cluster belum tersedia. Jalankan pipeline terlebih dahulu."}
+    sorted_rows = sorted(rows, key=lambda x: x.get("cluster_id", 0))
+    # Convert Timestamp/datetime fields to string
+    for r in sorted_rows:
+        for k, v in r.items():
+            if hasattr(v, "isoformat"):
+                r[k] = v.isoformat()
+    return {"clusters": sorted_rows, "total": len(sorted_rows), "k": KMEANS_K}
+
+
+@app.get("/api/clusters/assignment")
+async def get_cluster_assignment(
+    cluster_id: Optional[int] = None,
+    kecamatan: Optional[str] = None,
+):
+    """
+    Daftar wilayah beserta cluster_id dan cluster_label dari K-Means.
+    Bisa difilter per cluster_id atau kecamatan.
+    """
+    gold_path = lakehouse_path("gold/slum_risk_score")
+    rows = read_delta(gold_path)
+    if rows is None:
+        return {"assignments": [], "total": 0}
+    result = [
+        {
+            "id_wilayah": r.get("id_wilayah"),
+            "kelurahan": r.get("kelurahan"),
+            "kecamatan": r.get("kecamatan"),
+            "risk_score": r.get("risk_score"),
+            "risk_level": r.get("risk_level"),
+            "cluster_id": r.get("cluster_id"),
+            "cluster_label": r.get("cluster_label"),
+        }
+        for r in rows
+        if (cluster_id is None or r.get("cluster_id") == cluster_id)
+        and (kecamatan is None or r.get("kecamatan") == kecamatan)
+    ]
+    return {"assignments": result, "total": len(result)}
+
+
+# ============================================================
+# ROUTES: Forecast (Linear Regression)
+# ============================================================
+@app.get("/api/forecast")
+async def get_forecast(
+    trend: Optional[str] = None,
+    kecamatan: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """
+    Prediksi risk_score {horizon} hari ke depan menggunakan Linear Regression.
+    Dihitung berdasarkan deret waktu event history per wilayah (min 2 event).
+    Teknik analisis lanjutan #3 (Forecasting dengan horizon waktu).
+    """
+    forecast_path = lakehouse_path("gold/slum_forecast")
+    gold_path = lakehouse_path("gold/slum_risk_score")
+
+    forecast_rows = read_delta(forecast_path)
+    gold_rows = read_delta(gold_path) or []
+    gold_map = {r.get("id_wilayah", ""): r for r in gold_rows}
+
+    if forecast_rows is None:
+        return {
+            "forecast": [], "total": 0,
+            "horizon_days": FORECAST_HORIZON_DAYS,
+            "message": "Forecast belum tersedia. Diperlukan minimal 2 event survei per wilayah.",
+        }
+
+    result = []
+    for r in forecast_rows:
+        wid = r.get("id_wilayah", "")
+        gold = gold_map.get(wid, {})
+        row = dict(r)
+        row["kelurahan"] = gold.get("kelurahan", "")
+        row["kecamatan"] = gold.get("kecamatan", "")
+        row["risk_level"] = gold.get("risk_level", "")
+        # Normalize datetime fields
+        for k, v in row.items():
+            if hasattr(v, "isoformat"):
+                row[k] = v.isoformat()
+        result.append(row)
+
+    if trend:
+        result = [r for r in result if r.get("forecast_trend", "").lower() == trend.lower()]
+    if kecamatan:
+        result = [r for r in result if r.get("kecamatan", "") == kecamatan]
+
+    # Sort: worst forecast first
+    result.sort(key=lambda x: x.get("forecast_score", 0), reverse=True)
+    total = len(result)
+    page = result[offset:offset + limit]
+    return {
+        "forecast": page,
+        "total": total,
+        "horizon_days": FORECAST_HORIZON_DAYS,
+        "returned": len(page),
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(page) < total,
+    }
+
+
+@app.get("/api/wilayah/{id_wilayah}/forecast")
+async def get_wilayah_forecast(id_wilayah: str):
+    """Prediksi risk_score {horizon} hari ke depan untuk satu wilayah."""
+    forecast_path = lakehouse_path("gold/slum_forecast")
+    rows = read_delta(forecast_path)
+    if rows is None:
+        raise HTTPException(status_code=404, detail="Forecast belum tersedia")
+    found = [r for r in rows if r.get("id_wilayah") == id_wilayah]
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Tidak ada forecast untuk {id_wilayah} (butuh min 2 event)")
+    r = dict(found[0])
+    for k, v in r.items():
+        if hasattr(v, "isoformat"):
+            r[k] = v.isoformat()
+    return r
+
+
+# ============================================================
+# ROUTES: Model Metrics
+# ============================================================
+@app.get("/api/model/metrics")
+async def get_model_metrics(latest_only: bool = True):
+    """
+    Metrics model ML terbaru: AUC, F1, Accuracy, Precision, Recall,
+    Cross-Validation F1 (3-fold), Confusion Matrix (TP/TN/FP/FN),
+    Feature Importances.
+    """
+    metrics_path = lakehouse_path("silver/model_metrics")
+    rows = read_delta(metrics_path)
+    if rows is None:
+        return {
+            "metrics": [],
+            "total": 0,
+            "message": "Belum ada model yang ditraining. Upload ground truth CSV lalu trigger pipeline.",
+        }
+    # Normalize datetime fields
+    clean_rows = []
+    for r in rows:
+        row = dict(r)
+        for k, v in row.items():
+            if hasattr(v, "isoformat"):
+                row[k] = v.isoformat()
+        clean_rows.append(row)
+
+    if latest_only:
+        clean_rows.sort(key=lambda x: str(x.get("trained_at", "")), reverse=True)
+        return {
+            "metrics": clean_rows[:1],
+            "total": len(clean_rows),
+            "latest": clean_rows[0] if clean_rows else None,
+        }
+    return {"metrics": clean_rows, "total": len(clean_rows)}
+
+
 @app.get("/api/summary")
 async def get_summary():
     """Dashboard summary statistics."""
     gold_path = lakehouse_path("gold/slum_risk_score")
     wilayah_path = lakehouse_path("bronze/master_wilayah")
     bronze_path = lakehouse_path("bronze/survey_events")
+    forecast_path = lakehouse_path("gold/slum_forecast")
 
     gold_rows = read_delta(gold_path) or []
     wilayah_rows = read_delta(wilayah_path) or []
     survey_rows = read_delta(bronze_path) or []
+    forecast_rows = read_delta(forecast_path) or []
 
     total_wilayah = len(wilayah_rows)
     total_kumuh = sum(1 for r in gold_rows if r.get("label_prediksi") == 1)
@@ -1407,12 +1593,29 @@ async def get_summary():
         lvl = r.get("risk_level", "Belum Didata")
         level_counts[lvl] = level_counts.get(lvl, 0) + 1
 
+    # Cluster distribution
+    cluster_counts = {}
+    for r in gold_rows:
+        cl = r.get("cluster_label", "")
+        if cl:
+            cluster_counts[cl] = cluster_counts.get(cl, 0) + 1
+
+    # Forecast trend summary
+    forecast_trend_counts = {"Memburuk": 0, "Stabil": 0, "Membaik": 0}
+    for r in forecast_rows:
+        t = r.get("forecast_trend", "")
+        if t in forecast_trend_counts:
+            forecast_trend_counts[t] += 1
+
     return {
         "total_wilayah": total_wilayah,
         "total_kumuh": total_kumuh,
         "total_jiwa_terdampak": total_jiwa,
         "total_survey_events": total_survey_events,
         "risk_level_breakdown": level_counts,
+        "cluster_distribution": cluster_counts,
+        "forecast_trend_summary": forecast_trend_counts,
+        "total_forecasted": len(forecast_rows),
         "last_updated": datetime.utcnow().isoformat(),
     }
 

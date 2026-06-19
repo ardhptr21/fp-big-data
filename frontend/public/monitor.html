@@ -362,6 +362,50 @@
       </div>
     </div>
   </div>
+
+  <!-- ===================== ANALYTICS PANELS ===================== -->
+  <div class="monitor-page" style="padding-top:0;">
+
+    <!-- Model Metrics -->
+    <div class="card" style="margin-bottom:1.5rem;">
+      <div class="card-header">
+        <span class="card-title">Evaluasi Model ML (RandomForest + CrossValidator)</span>
+        <span id="metrics-status" style="font-size:0.75rem;color:var(--text-muted);">Memuat...</span>
+      </div>
+      <div class="card-body">
+        <div id="metrics-panel">
+          <div class="empty-state"><div class="empty-title">Belum ada data model</div><div class="empty-msg">Upload ground truth CSV dan jalankan pipeline untuk melatih model.</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- K-Means Clusters -->
+    <div class="card" style="margin-bottom:1.5rem;">
+      <div class="card-header">
+        <span class="card-title">K-Means Clustering Wilayah (K=4)</span>
+        <span id="cluster-status" style="font-size:0.75rem;color:var(--text-muted);">Memuat...</span>
+      </div>
+      <div class="card-body">
+        <div id="cluster-panel">
+          <div class="empty-state"><div class="empty-title">Belum ada data cluster</div><div class="empty-msg">Jalankan pipeline untuk menghasilkan clustering wilayah.</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Forecast Summary -->
+    <div class="card" style="margin-bottom:1.5rem;">
+      <div class="card-header">
+        <span class="card-title">Forecasting Risk Score T+30 Hari (Linear Regression)</span>
+        <span id="forecast-status" style="font-size:0.75rem;color:var(--text-muted);">Memuat...</span>
+      </div>
+      <div class="card-body">
+        <div id="forecast-panel">
+          <div class="empty-state"><div class="empty-title">Belum ada data forecast</div><div class="empty-msg">Diperlukan minimal 2 event survei per wilayah.</div></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
 </div>
 
 <div class="toast-container" id="toast-container"></div>
@@ -385,12 +429,12 @@ const jobMeta = {
     desc: 'Validasi, history, latest indicators, feature matrix',
   },
   job2_train_model: {
-    name: 'Job 2 - Training Model',
-    desc: 'RandomForest training atau refresh model',
+    name: 'Job 2 - Training Model ML',
+    desc: 'RandomForest + CrossValidator (3-fold) · AUC, F1, Confusion Matrix',
   },
   job3_silver_gold: {
     name: 'Job 3 - Silver ke Gold',
-    desc: 'Risk score, prediksi, trend, prioritas intervensi',
+    desc: 'Risk score · ML Prediction · K-Means Clustering · Forecasting T+30 hari · Prioritas',
   },
 };
 
@@ -717,6 +761,346 @@ async function cancelPipeline() {
 document.getElementById('refresh-btn').addEventListener('click', () => refreshStatus(true));
 document.getElementById('cancel-btn').addEventListener('click', cancelPipeline);
 
+// ============================================================
+// Analytics Panels
+// ============================================================
+
+const CLUSTER_COLORS = ['#22c55e', '#f59e0b', '#f97316', '#ef4444'];
+
+function renderMetricsPanel(data) {
+  const el = document.getElementById('metrics-panel');
+  const statusEl = document.getElementById('metrics-status');
+  const m = data?.latest;
+  if (!m) {
+    statusEl.textContent = data?.message || 'Belum tersedia';
+    el.innerHTML = `<div class="empty-state"><div class="empty-title">Belum ada model</div><div class="empty-msg">${escapeHtml(data?.message || 'Upload ground truth CSV dan jalankan pipeline.')}</div></div>`;
+    return;
+  }
+  statusEl.textContent = `Ditraining: ${formatDateTime(m.trained_at)}`;
+  const fmt = v => v != null ? Number(v).toFixed(4) : '--';
+  const cvF1 = m.cv_mean_f1 != null ? `${fmt(m.cv_mean_f1)} ± ${fmt(m.cv_std_f1)}` : 'N/A (data < 9)';
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:0.75rem;margin-bottom:1.25rem;">
+      ${[
+        ['AUC (ROC)', fmt(m.auc)],
+        ['F1-Score', fmt(m.f1_score)],
+        ['Accuracy', fmt(m.accuracy)],
+        ['Precision', fmt(m.precision)],
+        ['Recall', fmt(m.recall)],
+        ['CV F1 (3-fold)', cvF1],
+      ].map(([label, val]) => `
+        <div class="monitor-meta-item">
+          <div class="monitor-meta-label">${label}</div>
+          <div class="monitor-meta-value">${escapeHtml(String(val))}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
+      <div>
+        <div class="sidebar-title" style="margin-bottom:0.5rem;">Confusion Matrix</div>
+        <table style="width:100%;border-collapse:collapse;font-size:0.84rem;">
+          <thead><tr>
+            <th style="padding:6px 10px;text-align:left;border:1px solid var(--line);"></th>
+            <th style="padding:6px 10px;text-align:center;border:1px solid var(--line);color:var(--civic-green);">Prediksi Tidak Kumuh</th>
+            <th style="padding:6px 10px;text-align:center;border:1px solid var(--line);color:var(--risk-berat);">Prediksi Kumuh</th>
+          </tr></thead>
+          <tbody>
+            <tr>
+              <td style="padding:6px 10px;border:1px solid var(--line);font-weight:700;color:var(--civic-green);">Aktual Tidak Kumuh</td>
+              <td style="padding:6px 10px;text-align:center;border:1px solid var(--line);background:rgba(34,197,94,0.08);">TN = ${m.confusion_matrix_tn ?? '--'}</td>
+              <td style="padding:6px 10px;text-align:center;border:1px solid var(--line);background:rgba(239,68,68,0.08);">FP = ${m.confusion_matrix_fp ?? '--'}</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 10px;border:1px solid var(--line);font-weight:700;color:var(--risk-berat);">Aktual Kumuh</td>
+              <td style="padding:6px 10px;text-align:center;border:1px solid var(--line);background:rgba(239,68,68,0.08);">FN = ${m.confusion_matrix_fn ?? '--'}</td>
+              <td style="padding:6px 10px;text-align:center;border:1px solid var(--line);background:rgba(34,197,94,0.08);">TP = ${m.confusion_matrix_tp ?? '--'}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <div class="sidebar-title" style="margin-bottom:0.5rem;">Info Model</div>
+        ${[
+          ['Algoritma', m.algorithm || 'RandomForest'],
+          ['N Trees', m.n_trees ?? '--'],
+          ['Max Depth', m.max_depth ?? '--'],
+          ['Train Samples', m.n_train ?? '--'],
+          ['Test Samples', m.n_test ?? '--'],
+          ['CV Folds', m.cv_folds ?? '--'],
+          ['Model Version', m.model_version || '--'],
+        ].map(([label, val]) => `
+          <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--line);font-size:0.82rem;">
+            <span style="color:var(--text-muted);">${label}</span>
+            <span style="font-weight:700;color:var(--text-primary);">${escapeHtml(String(val))}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// Cluster wilayah cache (lazy load per cluster_id)
+const _clusterWilayahCache = {};
+let _allAssignments = null;
+
+async function fetchClusterAssignments() {
+  if (_allAssignments) return _allAssignments;
+  try {
+    const data = await getJSON(`${API_BASE}/clusters/assignment`, { ttl: 60000 });
+    _allAssignments = data.assignments || [];
+  } catch (e) {
+    _allAssignments = [];
+  }
+  return _allAssignments;
+}
+
+async function toggleClusterDetail(clusterId, color) {
+  const detailEl = document.getElementById(`cluster-detail-${clusterId}`);
+  const btnEl = document.getElementById(`cluster-btn-${clusterId}`);
+  if (!detailEl || !btnEl) return;
+
+  const isOpen = detailEl.style.display !== 'none';
+  if (isOpen) {
+    detailEl.style.display = 'none';
+    btnEl.textContent = 'Lihat Wilayah ▼';
+    return;
+  }
+
+  // Tampilkan loading
+  detailEl.style.display = 'block';
+  detailEl.innerHTML = `<div style="padding:0.75rem;text-align:center;color:var(--text-muted);font-size:0.82rem;">Memuat wilayah...</div>`;
+  btnEl.textContent = 'Tutup ▲';
+
+  const allRows = await fetchClusterAssignments();
+  const rows = allRows
+    .filter(r => r.cluster_id === clusterId)
+    .sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0)); // sort by risk desc
+
+  if (!rows.length) {
+    detailEl.innerHTML = `<div style="padding:0.75rem;text-align:center;color:var(--text-muted);font-size:0.82rem;">Tidak ada wilayah dalam cluster ini.</div>`;
+    return;
+  }
+
+  const badgeClass = {
+    'Ringan': 'badge-ringan', 'Sedang': 'badge-sedang',
+    'Berat': 'badge-berat', 'Sangat Berat': 'badge-sangat-berat',
+  };
+
+  // Warna berdasarkan level risiko (bukan warna cluster)
+  const riskColor = {
+    'Ringan': '#22c55e',
+    'Sedang': '#f59e0b',
+    'Berat': '#f97316',
+    'Sangat Berat': '#ef4444',
+  };
+
+  detailEl.innerHTML = `
+    <div style="overflow-x:auto;margin-top:0.75rem;">
+      <table style="width:100%;border-collapse:collapse;font-size:0.8rem;">
+        <thead>
+          <tr style="border-bottom:2px solid ${color}44;">
+            <th style="padding:7px 10px;text-align:left;color:var(--text-muted);font-weight:600;">#</th>
+            <th style="padding:7px 10px;text-align:left;color:var(--text-muted);font-weight:600;">ID Wilayah</th>
+            <th style="padding:7px 10px;text-align:left;color:var(--text-muted);font-weight:600;">Kelurahan</th>
+            <th style="padding:7px 10px;text-align:left;color:var(--text-muted);font-weight:600;">Kecamatan</th>
+            <th style="padding:7px 10px;text-align:right;color:var(--text-muted);font-weight:600;">Risk Score</th>
+            <th style="padding:7px 10px;text-align:left;color:var(--text-muted);font-weight:600;">Level</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r, i) => {
+            const sc = Number(r.risk_score || 0);
+            const rc = riskColor[r.risk_level] || '#888';
+            return `
+            <tr style="border-bottom:1px solid var(--line);">
+              <td style="padding:7px 10px;color:var(--text-muted);font-size:0.74rem;">${i + 1}</td>
+              <td style="padding:7px 10px;font-family:monospace;font-size:0.74rem;">${escapeHtml(r.id_wilayah || '--')}</td>
+              <td style="padding:7px 10px;font-weight:600;color:var(--text-primary);">${escapeHtml(r.kelurahan || '--')}</td>
+              <td style="padding:7px 10px;color:var(--text-secondary);">${escapeHtml(r.kecamatan || '--')}</td>
+              <td style="padding:7px 10px;">
+                <div style="display:flex;align-items:center;gap:0.5rem;justify-content:flex-end;">
+                  <span style="font-weight:800;color:${rc};min-width:32px;text-align:right;">${sc.toFixed(1)}</span>
+                  <div style="width:52px;height:6px;border-radius:3px;background:var(--bg-primary);border:1px solid var(--line);overflow:hidden;flex-shrink:0;">
+                    <div style="width:${Math.min(sc,100)}%;height:100%;background:${rc};border-radius:3px;"></div>
+                  </div>
+                </div>
+              </td>
+              <td style="padding:7px 10px;">
+                <span class="badge ${badgeClass[r.risk_level] || 'badge-none'}" style="font-size:0.7rem;">${escapeHtml(r.risk_level || 'Belum Didata')}</span>
+              </td>
+            </tr>
+          `}).join('')}
+        </tbody>
+      </table>
+      <div style="padding:0.5rem 10px;font-size:0.74rem;color:var(--text-muted);">${rows.length} wilayah dalam cluster ini</div>
+    </div>
+  `;
+}
+
+function renderClusterPanel(data) {
+  const el = document.getElementById('cluster-panel');
+  const statusEl = document.getElementById('cluster-status');
+  const clusters = data?.clusters || [];
+  if (!clusters.length) {
+    statusEl.textContent = data?.message || 'Belum tersedia';
+    el.innerHTML = `<div class="empty-state"><div class="empty-title">Belum ada cluster</div><div class="empty-msg">${escapeHtml(data?.message || 'Jalankan pipeline terlebih dahulu.')}</div></div>`;
+    return;
+  }
+  statusEl.textContent = `K=${data.k || clusters.length} cluster · klik cluster untuk melihat wilayah`;
+
+  // Sort by avg_risk_score descending — risiko tertinggi di atas
+  const sorted = [...clusters].sort((a, b) => (b.avg_risk_score || 0) - (a.avg_risk_score || 0));
+
+  // Warna kartu berdasarkan risk level label
+  function clusterCardColor(c) {
+    const label = (c.cluster_label || '').toLowerCase();
+    if (label.includes('sangat tinggi')) return '#ef4444';
+    if (label.includes('tinggi'))        return '#f97316';
+    if (label.includes('sedang'))        return '#f59e0b';
+    if (label.includes('rendah'))        return '#22c55e';
+    // fallback: derive from avg_risk_score
+    const s = c.avg_risk_score || 0;
+    if (s >= 75) return '#ef4444';
+    if (s >= 50) return '#f97316';
+    if (s >= 25) return '#f59e0b';
+    return '#22c55e';
+  }
+
+  el.innerHTML = `
+    <p style="font-size:0.84rem;color:var(--text-muted);margin:0 0 1rem;">
+      K-Means mengelompokkan wilayah berdasarkan 7 indikator PUPR (distandarisasi).
+      <strong>Klik cluster card</strong> untuk melihat daftar wilayah di dalamnya.
+    </p>
+    <div style="display:flex;flex-direction:column;gap:0.75rem;">
+      ${sorted.map((c) => {
+        const color = clusterCardColor(c);
+        return `
+          <div style="border:2px solid ${color};border-radius:10px;overflow:hidden;background:var(--surface);">
+            <!-- Cluster header (clickable) -->
+            <div
+              onclick="toggleClusterDetail(${c.cluster_id}, '${color}')"
+              style="display:flex;justify-content:space-between;align-items:center;padding:1rem 1.1rem;cursor:pointer;background:${color}11;gap:1rem;transition:background 0.2s;"
+              onmouseover="this.style.background='${color}22'" onmouseout="this.style.background='${color}11'"
+            >
+              <div style="display:flex;align-items:center;gap:1rem;flex:1;min-width:0;">
+                <div style="
+                  width:40px;height:40px;border-radius:50%;
+                  background:${color}22;border:2px solid ${color};
+                  display:flex;align-items:center;justify-content:center;
+                  font-weight:900;font-size:1rem;color:${color};flex-shrink:0;
+                ">${c.cluster_id}</div>
+                <div style="min-width:0;">
+                  <div style="font-weight:800;font-size:0.95rem;color:${color};">${escapeHtml(c.cluster_label || '')}</div>
+                  <div style="font-size:0.78rem;color:var(--text-muted);margin-top:2px;">
+                    ${c.jumlah_wilayah} wilayah &nbsp;·&nbsp;
+                    Rata-rata risk score: <strong style="color:${color};">${Number(c.avg_risk_score || 0).toFixed(1)}</strong>
+                  </div>
+                </div>
+              </div>
+              <button
+                id="cluster-btn-${c.cluster_id}"
+                style="
+                  flex-shrink:0;padding:0.3rem 0.8rem;border-radius:6px;
+                  border:1px solid ${color};background:transparent;
+                  color:${color};font-size:0.78rem;font-weight:700;cursor:pointer;
+                  transition:background 0.15s;white-space:nowrap;
+                "
+                onmouseover="this.style.background='${color}22'" onmouseout="this.style.background='transparent'"
+                onclick="event.stopPropagation();toggleClusterDetail(${c.cluster_id}, '${color}')"
+              >Lihat Wilayah ▼</button>
+            </div>
+            <!-- Expanded wilayah list -->
+            <div id="cluster-detail-${c.cluster_id}" style="display:none;border-top:1px solid ${color}44;padding:0 0.75rem 0.75rem;background:var(--bg-primary);"></div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+
+function renderForecastPanel(data) {
+  const el = document.getElementById('forecast-panel');
+  const statusEl = document.getElementById('forecast-status');
+  const rows = data?.forecast || [];
+  const total = data?.total || 0;
+  if (!total && data?.message) {
+    statusEl.textContent = 'Belum tersedia';
+    el.innerHTML = `<div class="empty-state"><div class="empty-title">Belum ada forecast</div><div class="empty-msg">${escapeHtml(data.message)}</div></div>`;
+    return;
+  }
+  const memburuk = rows.filter(r => r.forecast_trend === 'Memburuk').length;
+  const membaik = rows.filter(r => r.forecast_trend === 'Membaik').length;
+  const stabil = rows.filter(r => r.forecast_trend === 'Stabil').length;
+  statusEl.textContent = `${total} wilayah diforecast · Horizon: ${data.horizon_days || 30} hari`;
+  el.innerHTML = `
+    <p style="font-size:0.84rem;color:var(--text-muted);margin:0 0 1rem;">Prediksi risk score T+${data.horizon_days || 30} hari menggunakan regresi linear pada deret waktu survei (min 2 event per wilayah).</p>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.75rem;margin-bottom:1.25rem;">
+      <div class="monitor-meta-item" style="border-color:#ef4444;">
+        <div class="monitor-meta-label" style="color:#ef4444;">Memburuk</div>
+        <div class="monitor-meta-value" style="color:#ef4444;font-size:1.5rem;">${memburuk}</div>
+        <div style="font-size:0.74rem;color:var(--text-muted);">wilayah perlu perhatian</div>
+      </div>
+      <div class="monitor-meta-item" style="border-color:#f59e0b;">
+        <div class="monitor-meta-label" style="color:#f59e0b;">Stabil</div>
+        <div class="monitor-meta-value" style="color:#f59e0b;font-size:1.5rem;">${stabil}</div>
+        <div style="font-size:0.74rem;color:var(--text-muted);">wilayah kondisi stabil</div>
+      </div>
+      <div class="monitor-meta-item" style="border-color:#22c55e;">
+        <div class="monitor-meta-label" style="color:#22c55e;">Membaik</div>
+        <div class="monitor-meta-value" style="color:#22c55e;font-size:1.5rem;">${membaik}</div>
+        <div style="font-size:0.74rem;color:var(--text-muted);">wilayah menunjukkan perbaikan</div>
+      </div>
+    </div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+        <thead>
+          <tr style="border-bottom:2px solid var(--line);">
+            <th style="padding:8px 10px;text-align:left;color:var(--text-muted);">Wilayah</th>
+            <th style="padding:8px 10px;text-align:right;color:var(--text-muted);">Risk Saat Ini</th>
+            <th style="padding:8px 10px;text-align:right;color:var(--text-muted);">Forecast T+${data.horizon_days || 30}h</th>
+            <th style="padding:8px 10px;text-align:left;color:var(--text-muted);">Trend</th>
+            <th style="padding:8px 10px;text-align:right;color:var(--text-muted);">Δ/hari</th>
+            <th style="padding:8px 10px;text-align:left;color:var(--text-muted);">Level Forecast</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.slice(0, 10).map(r => {
+            const trendColor = r.forecast_trend === 'Memburuk' ? '#ef4444' : r.forecast_trend === 'Membaik' ? '#22c55e' : '#f59e0b';
+            const trendIcon = r.forecast_trend === 'Memburuk' ? '↑' : r.forecast_trend === 'Membaik' ? '↓' : '→';
+            return `
+              <tr style="border-bottom:1px solid var(--line);">
+                <td style="padding:8px 10px;font-family:monospace;font-size:0.78rem;">${escapeHtml(r.id_wilayah || '')}</td>
+                <td style="padding:8px 10px;text-align:right;font-weight:700;">${Number(r.current_risk_score || 0).toFixed(1)}</td>
+                <td style="padding:8px 10px;text-align:right;font-weight:800;color:${trendColor};">${Number(r.forecast_score || 0).toFixed(1)}</td>
+                <td style="padding:8px 10px;"><span style="color:${trendColor};font-weight:700;">${trendIcon} ${escapeHtml(r.forecast_trend || '')}</span></td>
+                <td style="padding:8px 10px;text-align:right;font-family:monospace;">${Number(r.slope_per_day || 0).toFixed(3)}</td>
+                <td style="padding:8px 10px;font-size:0.78rem;color:var(--text-muted);">${escapeHtml(r.forecast_risk_level || '')}</td>
+              </tr>
+            `;
+          }).join('')}
+          ${rows.length > 10 ? `<tr><td colspan="6" style="padding:8px 10px;text-align:center;color:var(--text-muted);font-size:0.8rem;">… ${rows.length - 10} wilayah lainnya. Lihat API /api/forecast untuk data lengkap.</td></tr>` : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function loadAnalyticsPanels() {
+  try {
+    const [metricsData, clusterData, forecastData] = await Promise.allSettled([
+      getJSON(`${API_BASE}/model/metrics`, { ttl: 60000 }),
+      getJSON(`${API_BASE}/clusters`, { ttl: 60000 }),
+      getJSON(`${API_BASE}/forecast?limit=20`, { ttl: 60000 }),
+    ]);
+    if (metricsData.status === 'fulfilled') renderMetricsPanel(metricsData.value);
+    if (clusterData.status === 'fulfilled') renderClusterPanel(clusterData.value);
+    if (forecastData.status === 'fulfilled') renderForecastPanel(forecastData.value);
+  } catch (e) {
+    console.warn('Analytics panels load error:', e);
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   renderServices(null);
   renderJobs({});
@@ -727,6 +1111,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   ]);
   connectSSE();
   startPolling();
+  loadAnalyticsPanels();
 });
 </script>
 </body>

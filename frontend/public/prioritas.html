@@ -132,13 +132,14 @@
               <th>Tingkat Risiko</th>
               <th>Prob. Kumuh</th>
               <th>Jiwa</th>
+              <th>Cluster</th>
               <th>Faktor Utama</th>
               <th>Aksi</th>
             </tr>
           </thead>
           <tbody id="priority-tbody">
             <tr>
-              <td colspan="10">
+              <td colspan="11">
                 <div class="loading-spinner">
                   <div class="spinner"></div> Memuat data...
                 </div>
@@ -263,6 +264,13 @@ function renderTable() {
     const jiwa = (r.jiwa_terdampak || 0).toLocaleString('id-ID');
     const level = r.risk_level || 'Belum Didata';
     const factors = [r.top_faktor_1, r.top_faktor_2, r.top_faktor_3].filter(Boolean).join(', ') || '--';
+    const clusterLabel = r.cluster_label || '';
+    const clusterColors = ['#22c55e','#f59e0b','#f97316','#ef4444'];
+    const cid = r.cluster_id != null ? parseInt(r.cluster_id) : null;
+    const clusterColor = cid != null ? (clusterColors[cid % clusterColors.length] || '#888') : '#888';
+    const clusterBadge = clusterLabel
+      ? `<span style="display:inline-flex;align-items:center;gap:0.3rem;padding:0.2rem 0.5rem;border-radius:999px;border:1px solid ${clusterColor};background:${clusterColor}18;font-size:0.72rem;font-weight:700;color:${clusterColor};white-space:nowrap;">${clusterLabel}</span>`
+      : '<span style="color:var(--text-muted);font-size:0.78rem;">--</span>';
 
     return `
       <tr>
@@ -281,6 +289,7 @@ function renderTable() {
         <td><span class="badge ${getBadgeClass(level)}">${level}</span></td>
         <td>${proba}</td>
         <td>${jiwa}</td>
+        <td>${clusterBadge}</td>
         <td style="font-size:0.75rem;color:var(--text-secondary);max-width:200px;">${factors}</td>
         <td>
           <a href="/wilayah.html?id=${encodeURIComponent(r.id_wilayah || '')}" class="btn btn-secondary btn-sm">Rincian</a>
@@ -303,12 +312,12 @@ function renderChart() {
 
 function exportCSV() {
   if (filteredData.length === 0) return;
-  const headers = ['Peringkat','ID Wilayah','Kelurahan','Kecamatan','Skor Risiko','Tingkat Risiko','Probabilitas Kumuh','Jiwa','Faktor 1','Faktor 2','Faktor 3'];
+  const headers = ['Peringkat','ID Wilayah','Kelurahan','Kecamatan','Skor Risiko','Tingkat Risiko','Probabilitas Kumuh','Jiwa','Cluster','Faktor 1','Faktor 2','Faktor 3'];
   const rows = filteredData.map(r => [
     r.prioritas_rank||'',r.id_wilayah||'',r.kelurahan||'',r.kecamatan||'',
     parseFloat(r.risk_score||0).toFixed(1),r.risk_level||'',
     r.proba_kumuh!=null?(r.proba_kumuh*100).toFixed(1)+'%':'',
-    r.jiwa_terdampak||0,r.top_faktor_1||'',r.top_faktor_2||'',r.top_faktor_3||''
+    r.jiwa_terdampak||0,r.cluster_label||'',r.top_faktor_1||'',r.top_faktor_2||'',r.top_faktor_3||''
   ]);
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
   const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
