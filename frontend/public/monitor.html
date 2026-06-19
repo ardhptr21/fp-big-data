@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monitoring Pipeline | SlumMap Surabaya</title>
+  <meta name="description" content="Monitoring status pipeline data lakehouse dan progres pemrosesan survei secara real-time.">
+  <script src="/js/theme.js"></script>
+  <script src="/js/pipeline-status.js"></script>
+  <script src="/js/api-cache.js"></script>
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    .monitor-page {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem 3rem;
+    }
+
+    .monitor-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.9fr);
+      gap: 1.5rem;
+      align-items: start;
+    }
+
+    .monitor-stack {
+      display: grid;
+      gap: 1.5rem;
+    }
+
+    .monitor-progress-track {
+      height: 14px;
+      margin-top: 1rem;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--pipeline-progress-bg);
+      border: 1px solid var(--line);
+    }
+
+    .monitor-progress-fill {
+      width: 0;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--civic-green), var(--civic-blue));
+      transition: width var(--transition);
+    }
+
+    .monitor-meta-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    .monitor-meta-item {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem;
+    }
+
+    .monitor-meta-label {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    .monitor-meta-value {
+      margin-top: 0.35rem;
+      font-size: 0.94rem;
+      font-weight: 720;
+      color: var(--text-primary);
+      word-break: break-word;
+    }
+
+    .monitor-chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .monitor-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.35rem 0.6rem;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--bg-primary);
+      color: var(--text-secondary);
+      font-size: 0.78rem;
+      font-weight: 700;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .monitor-job-list {
+      display: grid;
+      gap: 0.75rem;
+    }
+
+    .monitor-job-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.85rem 0.9rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      background: var(--surface);
+    }
+
+    .monitor-job-name {
+      font-size: 0.86rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .monitor-job-desc {
+      margin-top: 0.2rem;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+    }
+
+    .monitor-service-list {
+      display: grid;
+      gap: 0.75rem;
+    }
+
+    .monitor-service-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.8rem 0.9rem;
+      background: var(--surface);
+    }
+
+    .monitor-service-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .monitor-service-name {
+      font-size: 0.86rem;
+      font-weight: 720;
+      color: var(--text-primary);
+    }
+
+    .monitor-service-url {
+      margin-top: 0.25rem;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+
+    .monitor-log {
+      display: grid;
+      gap: 0.75rem;
+      max-height: 620px;
+      overflow: auto;
+    }
+
+    .monitor-log-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.85rem 0.9rem;
+      background: var(--surface);
+    }
+
+    .monitor-log-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 0.75rem;
+      margin-bottom: 0.45rem;
+    }
+
+    .monitor-log-title {
+      font-size: 0.82rem;
+      font-weight: 760;
+      color: var(--text-primary);
+    }
+
+    .monitor-log-time {
+      font-size: 0.74rem;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+
+    .monitor-log-body {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .monitor-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    @media (max-width: 980px) {
+      .monitor-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .monitor-meta-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="/" class="nav-brand">
+    <div class="nav-brand-icon">GIS</div>
+    <span>SlumMap Surabaya</span>
+  </a>
+  <ul class="nav-links">
+    <li><a href="/">Peta Utama</a></li>
+    <li><a href="/input.html">Isi Survei</a></li>
+    <li><a href="/prioritas.html">Prioritas</a></li>
+    <li><a href="/register.html">Wilayah Baru</a></li>
+    <li><a href="/monitor.html" class="active">Monitoring</a></li>
+  </ul>
+</nav>
+
+<div class="page">
+  <div class="monitor-page">
+    <div class="page-header">
+      <h1 class="page-title">Monitoring Pipeline</h1>
+      <p class="page-subtitle">Status queue, progres pemrosesan, hasil job Spark, dan event live dari pipeline data.</p>
+    </div>
+
+    <div class="stat-grid" style="margin-bottom:1.5rem;">
+      <div class="stat-card info">
+        <div class="stat-label">State</div>
+        <div class="stat-value" id="stat-state">--</div>
+        <div class="stat-sub" id="stat-phase">Menunggu status pipeline</div>
+      </div>
+      <div class="stat-card success">
+        <div class="stat-label">Progress</div>
+        <div class="stat-value" id="stat-progress">0%</div>
+        <div class="stat-sub" id="stat-progress-sub">Belum ada proses aktif</div>
+      </div>
+      <div class="stat-card warning">
+        <div class="stat-label">Affected IDs</div>
+        <div class="stat-value" id="stat-affected">0</div>
+        <div class="stat-sub" id="stat-affected-sub">wilayah dalam proses atau antrian</div>
+      </div>
+      <div class="stat-card danger">
+        <div class="stat-label">Version</div>
+        <div class="stat-value" id="stat-version">0</div>
+        <div class="stat-sub" id="stat-version-sub">iterasi pipeline tercatat</div>
+      </div>
+    </div>
+
+    <div class="monitor-layout">
+      <div class="monitor-stack">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Status Eksekusi</span>
+            <span class="badge badge-none" id="pipeline-state-badge">idle</span>
+          </div>
+          <div class="card-body">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;">
+              <div>
+                <div style="font-size:1.2rem;font-weight:800;color:var(--text-primary);" id="pipeline-phase-label">Siap menerima pembaruan</div>
+                <div style="margin-top:0.35rem;font-size:0.84rem;color:var(--text-muted);" id="pipeline-phase-detail">Belum ada proses aktif.</div>
+              </div>
+              <div class="monitor-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="refresh-btn">Refresh</button>
+                <button type="button" class="btn btn-danger btn-sm" id="cancel-btn">Batalkan Pipeline</button>
+              </div>
+            </div>
+            <div class="monitor-progress-track">
+              <div class="monitor-progress-fill" id="pipeline-progress-fill"></div>
+            </div>
+            <div class="monitor-meta-grid">
+              <div class="monitor-meta-item">
+                <div class="monitor-meta-label">Last Requested</div>
+                <div class="monitor-meta-value" id="meta-requested">--</div>
+              </div>
+              <div class="monitor-meta-item">
+                <div class="monitor-meta-label">Last Started</div>
+                <div class="monitor-meta-value" id="meta-started">--</div>
+              </div>
+              <div class="monitor-meta-item">
+                <div class="monitor-meta-label">Last Completed</div>
+                <div class="monitor-meta-value" id="meta-completed">--</div>
+              </div>
+              <div class="monitor-meta-item">
+                <div class="monitor-meta-label">Train Model Requested</div>
+                <div class="monitor-meta-value" id="meta-train-model">--</div>
+              </div>
+            </div>
+            <div style="margin-top:1rem;">
+              <div class="sidebar-title">Affected Wilayah</div>
+              <div class="monitor-chip-list" id="affected-chip-list">
+                <span class="monitor-chip">Tidak ada</span>
+              </div>
+            </div>
+            <div style="margin-top:1rem;">
+              <div class="sidebar-title">Pending / Running</div>
+              <div class="monitor-meta-grid">
+                <div class="monitor-meta-item">
+                  <div class="monitor-meta-label">Pending IDs</div>
+                  <div class="monitor-meta-value" id="meta-pending-ids">--</div>
+                </div>
+                <div class="monitor-meta-item">
+                  <div class="monitor-meta-label">Running IDs</div>
+                  <div class="monitor-meta-value" id="meta-running-ids">--</div>
+                </div>
+              </div>
+            </div>
+            <div style="margin-top:1rem;">
+              <div class="sidebar-title">Last Error</div>
+              <div class="monitor-meta-item">
+                <div class="monitor-meta-value" id="meta-last-error">Tidak ada error.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Status Job Spark</span>
+          </div>
+          <div class="card-body">
+            <div class="monitor-job-list" id="job-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="monitor-stack">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Service</span>
+          </div>
+          <div class="card-body">
+            <div class="monitor-service-list" id="service-list"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Event Feed</span>
+            <span style="font-size:0.75rem;color:var(--text-muted);" id="feed-status">Menunggu koneksi</span>
+          </div>
+          <div class="card-body">
+            <div class="monitor-log" id="event-feed">
+              <div class="empty-state">
+                <div class="empty-title">Belum ada event</div>
+                <div class="empty-msg">Feed akan terisi saat SSE atau refresh status masuk.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+const API_BASE = '/api';
+const FEED_LIMIT = 30;
+const POLL_INTERVAL_MS = 5000;
+const pipelineLabels = {
+  idle: 'Idle',
+  queued: 'Queued',
+  running: 'Running',
+  succeeded: 'Succeeded',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
+const jobMeta = {
+  job1_bronze_silver: {
+    name: 'Job 1 - Bronze ke Silver',
+    desc: 'Validasi, history, latest indicators, feature matrix',
+  },
+  job2_train_model: {
+    name: 'Job 2 - Training Model',
+    desc: 'RandomForest training atau refresh model',
+  },
+  job3_silver_gold: {
+    name: 'Job 3 - Silver ke Gold',
+    desc: 'Risk score, prediksi, trend, prioritas intervensi',
+  },
+};
+
+const serviceMeta = [
+  { id: 'frontend', name: 'Frontend', url: 'http://localhost:3000', healthUrl: null },
+  { id: 'api', name: 'FastAPI', url: 'http://localhost:8000', healthUrl: `${API_BASE}/../health`.replace('/api/../', '/') },
+  { id: 'docs', name: 'API Docs', url: 'http://localhost:8000/docs', healthUrl: null },
+  { id: 'hdfs', name: 'HDFS UI', url: 'http://localhost:9870', healthUrl: null },
+];
+
+let eventSource = null;
+let pollTimer = null;
+let currentPipeline = null;
+let eventFeed = [];
+let sseConnected = false;
+
+function getJSON(url, options = {}) {
+  if (window.apiCache?.getJSON) return window.apiCache.getJSON(url, options);
+  return fetch(url).then(res => {
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    return res.json();
+  });
+}
+
+function showToast(type, title, msg, duration = 4000) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+  const icons = { success: 'SUKSES', error: 'GAGAL', info: 'INFO', warning: 'PERLU CEK' };
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span class="toast-icon">${icons[type] || 'INFO'}</span><div class="toast-content"><div class="toast-title">${title}</div>${msg ? `<div class="toast-msg">${msg}</div>` : ''}</div>`;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'all 0.3s ease';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
+function formatDateTime(value) {
+  if (!value) return '--';
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return value;
+  return dt.toLocaleString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function badgeClassForState(state) {
+  if (state === 'running') return 'badge-sedang';
+  if (state === 'queued') return 'badge-berat';
+  if (state === 'succeeded') return 'badge-ringan';
+  if (state === 'failed') return 'badge-sangat-berat';
+  if (state === 'cancelled') return 'badge-none';
+  return 'badge-none';
+}
+
+function yesNo(value) {
+  return value ? 'Ya' : 'Tidak';
+}
+
+function pushEvent(item) {
+  eventFeed.unshift(item);
+  eventFeed = eventFeed.slice(0, FEED_LIMIT);
+  renderFeed();
+}
+
+function renderFeed() {
+  const el = document.getElementById('event-feed');
+  const statusEl = document.getElementById('feed-status');
+  statusEl.textContent = sseConnected ? 'SSE terhubung' : 'Mode fallback / polling';
+
+  if (eventFeed.length === 0) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-title">Belum ada event</div>
+        <div class="empty-msg">Feed akan terisi saat SSE atau refresh status masuk.</div>
+      </div>
+    `;
+    return;
+  }
+
+  el.innerHTML = eventFeed.map(item => `
+    <div class="monitor-log-item">
+      <div class="monitor-log-head">
+        <div class="monitor-log-title">${escapeHtml(item.title)}</div>
+        <div class="monitor-log-time">${escapeHtml(formatDateTime(item.time))}</div>
+      </div>
+      <div class="monitor-log-body">${escapeHtml(item.body)}</div>
+    </div>
+  `).join('');
+}
+
+function renderJobs(pipeline) {
+  const jobList = document.getElementById('job-list');
+  const jobStatuses = pipeline?.job_statuses || {};
+  jobList.innerHTML = Object.entries(jobMeta).map(([key, meta]) => {
+    const status = jobStatuses[key];
+    let badgeLabel = 'Belum ada';
+    let badgeClass = 'badge-none';
+    if (status === 'pending' || status === 'running') {
+      badgeLabel = 'Pending';
+      badgeClass = 'badge-sedang';
+    } else if (status === 'success') {
+      badgeLabel = 'Sukses';
+      badgeClass = 'badge-ringan';
+    } else if (status === 'failed') {
+      badgeLabel = 'Gagal';
+      badgeClass = 'badge-sangat-berat';
+    } else if (status === 'cancelled') {
+      badgeLabel = 'Dibatalkan';
+      badgeClass = 'badge-none';
+    } else if (status === 'skipped') {
+      badgeLabel = 'Tidak dijalankan';
+      badgeClass = 'badge-none';
+    }
+
+    return `
+      <div class="monitor-job-item">
+        <div>
+          <div class="monitor-job-name">${meta.name}</div>
+          <div class="monitor-job-desc">${meta.desc}</div>
+        </div>
+        <span class="badge ${badgeClass}">${badgeLabel}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderServices(apiHealthy = null) {
+  const el = document.getElementById('service-list');
+  el.innerHTML = serviceMeta.map(service => {
+    let label = 'Info';
+    let badgeClass = 'badge-none';
+    if (service.id === 'api') {
+      label = apiHealthy ? 'Online' : 'Belum cek';
+      badgeClass = apiHealthy ? 'badge-ringan' : 'badge-none';
+    } else if (service.id === 'frontend') {
+      label = 'Aktif';
+      badgeClass = 'badge-ringan';
+    } else {
+      label = 'Buka manual';
+      badgeClass = 'badge-none';
+    }
+    return `
+      <div class="monitor-service-item">
+        <div class="monitor-service-head">
+          <div class="monitor-service-name">${service.name}</div>
+          <span class="badge ${badgeClass}">${label}</span>
+        </div>
+        <div class="monitor-service-url"><a href="${service.url}" target="_blank" rel="noreferrer">${service.url}</a></div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderPipeline(pipeline) {
+  currentPipeline = pipeline || currentPipeline || {};
+  const p = currentPipeline;
+  const stateLabel = pipelineLabels[p.state] || p.state || 'Idle';
+  const progress = Math.max(0, Math.min(100, Number(p.progress || 0)));
+  const allAffected = p.all_affected_ids || p.affected_ids || [];
+
+  document.getElementById('stat-state').textContent = stateLabel;
+  document.getElementById('stat-phase').textContent = p.phase_label || 'Siap menerima pembaruan';
+  document.getElementById('stat-progress').textContent = `${Math.round(progress)}%`;
+  document.getElementById('stat-progress-sub').textContent = p.running ? 'pipeline sedang berjalan' : (p.pending ? 'pipeline masih dalam antrian' : 'tidak ada proses aktif');
+  document.getElementById('stat-affected').textContent = String(allAffected.length || 0);
+  document.getElementById('stat-affected-sub').textContent = p.running ? 'wilayah sedang diproses' : (p.pending ? 'wilayah menunggu diproses' : 'tidak ada wilayah aktif');
+  document.getElementById('stat-version').textContent = String(p.version || 0);
+  document.getElementById('stat-version-sub').textContent = p.last_completed_at ? `selesai ${formatDateTime(p.last_completed_at)}` : 'belum ada run selesai';
+
+  const badge = document.getElementById('pipeline-state-badge');
+  badge.className = `badge ${badgeClassForState(p.state)}`;
+  badge.textContent = p.state || 'idle';
+
+  document.getElementById('pipeline-phase-label').textContent = p.phase_label || 'Siap menerima pembaruan';
+  document.getElementById('pipeline-phase-detail').textContent =
+    p.running ? 'Progres diambil dari orchestrator pipeline dan diperbarui via SSE.' :
+    p.pending ? 'Trigger sudah diterima dan menunggu debounce/eksekusi.' :
+    'Belum ada proses aktif. Submit survei atau upload data sekunder untuk memulai pipeline.';
+  document.getElementById('pipeline-progress-fill').style.width = `${progress}%`;
+  document.getElementById('meta-requested').textContent = formatDateTime(p.last_requested_at);
+  document.getElementById('meta-started').textContent = formatDateTime(p.last_started_at);
+  document.getElementById('meta-completed').textContent = formatDateTime(p.last_completed_at);
+  document.getElementById('meta-train-model').textContent = yesNo(p.train_model_requested);
+  document.getElementById('meta-pending-ids').textContent = (p.pending_affected_ids || []).join(', ') || '--';
+  document.getElementById('meta-running-ids').textContent = (p.running_affected_ids || []).join(', ') || '--';
+  document.getElementById('meta-last-error').textContent = p.last_error || 'Tidak ada error.';
+
+  const chips = document.getElementById('affected-chip-list');
+  chips.innerHTML = allAffected.length
+    ? allAffected.map(id => `<span class="monitor-chip">${escapeHtml(id)}</span>`).join('')
+    : '<span class="monitor-chip">Tidak ada</span>';
+
+  document.getElementById('cancel-btn').disabled = !(p.running || p.pending);
+  renderJobs(p);
+}
+
+async function refreshStatus(logEvent = true) {
+  try {
+    const pipeline = await getJSON(`${API_BASE}/pipeline/status`, { background: false, ttl: 0, staleTtl: 0 });
+    renderPipeline(pipeline);
+    if (logEvent) {
+      pushEvent({
+        title: 'Status dipuat ulang',
+        body: `${pipeline.state || 'idle'} - ${pipeline.phase_label || 'Siap menerima pembaruan'}`,
+        time: new Date().toISOString(),
+      });
+    }
+  } catch (error) {
+    pushEvent({
+      title: 'Gagal memuat status',
+      body: error.message,
+      time: new Date().toISOString(),
+    });
+    showToast('error', 'Gagal memuat status pipeline', error.message);
+  }
+}
+
+async function refreshApiHealth() {
+  try {
+    const data = await getJSON('/health', { background: false, ttl: 0, staleTtl: 0 });
+    renderServices(Boolean(data?.status === 'ok'));
+  } catch {
+    renderServices(false);
+  }
+}
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = window.setInterval(() => refreshStatus(false), POLL_INTERVAL_MS);
+}
+
+function stopPolling() {
+  if (!pollTimer) return;
+  window.clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+function connectSSE() {
+  if (eventSource) return;
+  eventSource = new EventSource(`${API_BASE}/stream/updates`);
+  eventSource.onopen = () => {
+    sseConnected = true;
+    renderFeed();
+    stopPolling();
+    pushEvent({
+      title: 'SSE terhubung',
+      body: 'Menerima update pipeline secara real-time.',
+      time: new Date().toISOString(),
+    });
+  };
+  eventSource.onmessage = event => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.pipeline) renderPipeline(data.pipeline);
+      if (data.type !== 'heartbeat') {
+        pushEvent({
+          title: `Event: ${data.type || 'update'}`,
+          body: data.pipeline?.phase_label || data.reason || data.message || JSON.stringify(data).slice(0, 220),
+          time: data.timestamp || new Date().toISOString(),
+        });
+      }
+    } catch (error) {
+      pushEvent({
+        title: 'Event tidak valid',
+        body: error.message,
+        time: new Date().toISOString(),
+      });
+    }
+  };
+  eventSource.onerror = () => {
+    sseConnected = false;
+    renderFeed();
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    startPolling();
+  };
+}
+
+async function cancelPipeline() {
+  const btn = document.getElementById('cancel-btn');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/pipeline/cancel`, { method: 'POST' });
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    const data = await res.json();
+    if (data.pipeline) renderPipeline(data.pipeline);
+    pushEvent({
+      title: 'Permintaan cancel dikirim',
+      body: `Status: ${data.status || 'unknown'}`,
+      time: new Date().toISOString(),
+    });
+    showToast('info', 'Permintaan pembatalan dikirim', 'Pipeline akan dihentikan jika masih berjalan.');
+  } catch (error) {
+    showToast('error', 'Gagal membatalkan pipeline', error.message);
+    pushEvent({
+      title: 'Cancel gagal',
+      body: error.message,
+      time: new Date().toISOString(),
+    });
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('refresh-btn').addEventListener('click', () => refreshStatus(true));
+document.getElementById('cancel-btn').addEventListener('click', cancelPipeline);
+
+document.addEventListener('DOMContentLoaded', async () => {
+  renderServices(null);
+  renderJobs({});
+  renderFeed();
+  await Promise.all([
+    refreshApiHealth(),
+    refreshStatus(false),
+  ]);
+  connectSSE();
+  startPolling();
+});
+</script>
+</body>
+</html>

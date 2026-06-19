@@ -106,6 +106,11 @@ _pipeline_running_affected_ids: set[str] = set()
 _pipeline_train_requested = False
 _pipeline_cancel_requested = False
 _current_job_process: Optional[subprocess.Popen] = None
+PIPELINE_JOB_KEYS = (
+    "job1_bronze_silver",
+    "job2_train_model",
+    "job3_silver_gold",
+)
 _pipeline_state: Dict[str, Any] = {
     "state": "idle",
     "running": False,
@@ -119,6 +124,7 @@ _pipeline_state: Dict[str, Any] = {
     "last_completed_at": None,
     "last_error": None,
     "jobs_ok": {},
+    "job_statuses": {},
     "affected_ids": [],
     "pending_affected_ids": [],
     "running_affected_ids": [],
@@ -553,6 +559,20 @@ def set_pipeline_state(state: str, **extra):
     _pipeline_state.update(extra)
 
 
+def initialize_job_statuses(train_model: bool) -> Dict[str, str]:
+    return {
+        "job1_bronze_silver": "pending",
+        "job2_train_model": "pending" if train_model else "skipped",
+        "job3_silver_gold": "pending",
+    }
+
+
+def update_job_status(job_key: str, status: str):
+    statuses = dict(_pipeline_state.get("job_statuses") or {})
+    statuses[job_key] = status
+    _pipeline_state["job_statuses"] = statuses
+
+
 async def publish_pipeline_progress(phase: str, label: str, progress: float):
     bounded_progress = round(max(0.0, min(100.0, float(progress))), 1)
     set_pipeline_state(
@@ -650,6 +670,7 @@ def run_spark_job(job_file: str) -> bool:
 
 
 async def run_job_with_progress(
+    job_key: str,
     job_file: str,
     phase: str,
     label: str,
@@ -657,6 +678,7 @@ async def run_job_with_progress(
     end_progress: int,
     expected_seconds: int,
 ) -> bool:
+    update_job_status(job_key, "running")
     loop = asyncio.get_event_loop()
     future = loop.run_in_executor(None, run_spark_job, job_file)
     started_at = time.time()
@@ -676,8 +698,11 @@ async def run_job_with_progress(
         await asyncio.sleep(PROGRESS_TICK_SECONDS)
 
     ok = await future
+    update_job_status(job_key, "success" if ok else ("cancelled" if _pipeline_cancel_requested else "failed"))
     if ok:
         await publish_pipeline_progress(phase, label, end_progress)
+    else:
+        await broadcast_sse("processing_progress", {"pipeline": pipeline_status_payload()})
     return ok
 
 
@@ -722,6 +747,7 @@ async def request_pipeline(
             pending_affected_ids=sorted(_pipeline_affected_ids),
             running_affected_ids=[],
             train_model_requested=_pipeline_train_requested,
+            job_statuses=initialize_job_statuses(_pipeline_train_requested),
         )
     await broadcast_sse("processing_queued", {
         "reason": reason,
@@ -760,6 +786,10 @@ async def pipeline_worker():
 
 async def finish_pipeline_cancelled(affected_ids: List[str]):
     global _pipeline_running_affected_ids
+    statuses = dict(_pipeline_state.get("job_statuses") or {})
+    for job_key in PIPELINE_JOB_KEYS:
+        if statuses.get(job_key) in {"pending", "running"}:
+            statuses[job_key] = "cancelled"
     set_pipeline_state(
         "cancelled",
         phase="cancelled",
@@ -770,6 +800,7 @@ async def finish_pipeline_cancelled(affected_ids: List[str]):
         running_affected_ids=[],
         train_model_requested=False,
         last_error="Pipeline cancelled by user",
+        job_statuses=statuses,
     )
     _pipeline_running_affected_ids.clear()
     await broadcast_sse("processing_cancelled", {
@@ -790,6 +821,7 @@ async def run_pipeline():
     _pipeline_affected_ids.clear()
     current_affected_ids = sorted(_pipeline_running_affected_ids)
     train_model = _pipeline_train_requested or FORCE_TRAIN_EVERY_RUN
+    job_statuses = initialize_job_statuses(train_model)
     _pipeline_train_requested = False
     set_pipeline_state(
         "running",
@@ -800,6 +832,8 @@ async def run_pipeline():
         pending_affected_ids=[],
         running_affected_ids=current_affected_ids,
         train_model_requested=train_model,
+        job_statuses=job_statuses,
+        jobs_ok={},
     )
     await broadcast_sse("processing_started", {"pipeline": pipeline_status_payload()})
     log.info("=== Pipeline started ===")
@@ -809,6 +843,7 @@ async def run_pipeline():
 
     # Job 1: Bronze → Silver
     ok1 = await run_job_with_progress(
+        "job1_bronze_silver",
         "job1_bronze_silver.py",
         "validating",
         "Memeriksa dan merapikan data survei",
@@ -828,6 +863,7 @@ async def run_pipeline():
     ok2 = True
     if train_model:
         ok2 = await run_job_with_progress(
+            "job2_train_model",
             "job2_train_model.py",
             "analyzing",
             "Memperbarui analisis wilayah",
@@ -846,6 +882,7 @@ async def run_pipeline():
 
     # Job 3: Silver → Gold
     ok3 = await run_job_with_progress(
+        "job3_silver_gold",
         "job3_silver_gold.py",
         "publishing",
         "Menyiapkan hasil peta terbaru",
@@ -864,7 +901,11 @@ async def run_pipeline():
 
     if not ok3 and not train_model:
         log.warning("Gold step failed without model refresh; training model once, then retrying Gold")
+        update_job_status("job2_train_model", "pending")
+        update_job_status("job3_silver_gold", "pending")
+        await broadcast_sse("processing_progress", {"pipeline": pipeline_status_payload()})
         ok2 = await run_job_with_progress(
+            "job2_train_model",
             "job2_train_model.py",
             "analyzing",
             "Memperbarui analisis wilayah",
@@ -876,6 +917,7 @@ async def run_pipeline():
             await finish_pipeline_cancelled(current_affected_ids)
             return
         ok3 = await run_job_with_progress(
+            "job3_silver_gold",
             "job3_silver_gold.py",
             "publishing",
             "Menyiapkan hasil peta terbaru",
@@ -896,6 +938,7 @@ async def run_pipeline():
         phase_label="Pembaruan selesai" if pipeline_success else "Pemrosesan belum berhasil",
         progress=100,
         jobs_ok=jobs_ok,
+        job_statuses=_pipeline_state.get("job_statuses") or {},
         affected_ids=current_affected_ids,
         pending_affected_ids=sorted(_pipeline_affected_ids),
         running_affected_ids=[],
