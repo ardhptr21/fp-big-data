@@ -1,27 +1,39 @@
 /**
- * charts.js — Chart.js utilities for trend visualization
+ * charts.js - Chart.js utilities for trend visualization
  */
 
-const CHART_DEFAULTS = {
-  colors: {
-    blue: 'rgba(59, 130, 246, 1)',
-    blueAlpha: 'rgba(59, 130, 246, 0.15)',
-    teal: 'rgba(20, 184, 166, 1)',
-    tealAlpha: 'rgba(20, 184, 166, 0.15)',
-    red: 'rgba(239, 68, 68, 1)',
-    redAlpha: 'rgba(239, 68, 68, 0.15)',
-    orange: 'rgba(249, 115, 22, 1)',
-    yellow: 'rgba(234, 179, 8, 1)',
-    green: 'rgba(34, 197, 94, 1)',
-    greenAlpha: 'rgba(34, 197, 94, 0.15)',
-    muted: 'rgba(100, 116, 139, 0.3)',
-  },
-  textColor: '#94a3b8',
-  gridColor: 'rgba(99, 115, 160, 0.1)',
-};
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function chartTheme() {
+  return {
+    colors: {
+      blue: cssVar('--civic-blue'),
+      blueAlpha: cssVar('--civic-blue-soft'),
+      teal: cssVar('--civic-green'),
+      tealAlpha: cssVar('--civic-green-soft'),
+      red: cssVar('--risk-sangat-berat'),
+      redAlpha: cssVar('--risk-sangat-berat-bg'),
+      orange: cssVar('--risk-berat'),
+      yellow: cssVar('--risk-sedang'),
+      green: cssVar('--risk-ringan'),
+      greenAlpha: cssVar('--risk-ringan-bg'),
+      muted: cssVar('--risk-none'),
+    },
+    textColor: cssVar('--text-muted'),
+    gridColor: cssVar('--line-faint'),
+    tooltipBg: cssVar('--surface'),
+    tooltipBorder: cssVar('--line-strong'),
+    tooltipTitle: cssVar('--text-primary'),
+    tooltipBody: cssVar('--text-secondary'),
+  };
+}
+
+const CHART_DEFAULTS = chartTheme();
 
 Chart.defaults.color = CHART_DEFAULTS.textColor;
-Chart.defaults.font.family = "'Inter', sans-serif";
+Chart.defaults.font.family = '"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 Chart.defaults.font.size = 12;
 
 /**
@@ -32,6 +44,7 @@ Chart.defaults.font.size = 12;
 function createTrendChart(canvasId, historyData) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return null;
+  const theme = chartTheme();
 
   const ctx = canvas.getContext('2d');
 
@@ -59,20 +72,20 @@ function createTrendChart(canvasId, historyData) {
     data: {
       labels,
       datasets: [{
-        label: 'Risk Score',
+        label: 'Skor Risiko',
         data: scores,
-        borderColor: CHART_DEFAULTS.colors.blue,
-        backgroundColor: CHART_DEFAULTS.colors.blueAlpha,
+        borderColor: theme.colors.blue,
+        backgroundColor: theme.colors.blueAlpha,
         borderWidth: 2,
         fill: true,
         tension: 0.4,
         pointBackgroundColor: scores.map(s => {
-          if (s === null) return CHART_DEFAULTS.colors.muted;
+          if (s === null) return theme.colors.muted;
           const v = parseFloat(s);
-          if (v < 25) return CHART_DEFAULTS.colors.green;
-          if (v < 50) return CHART_DEFAULTS.colors.yellow;
-          if (v < 75) return CHART_DEFAULTS.colors.orange;
-          return CHART_DEFAULTS.colors.red;
+          if (v < 25) return theme.colors.green;
+          if (v < 50) return theme.colors.yellow;
+          if (v < 75) return theme.colors.orange;
+          return theme.colors.red;
         }),
         pointRadius: 5,
         pointHoverRadius: 7,
@@ -84,25 +97,25 @@ function createTrendChart(canvasId, historyData) {
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: '#1a2234',
-          borderColor: 'rgba(99,115,160,0.3)',
+          backgroundColor: theme.tooltipBg,
+          borderColor: theme.tooltipBorder,
           borderWidth: 1,
-          titleColor: '#e2e8f0',
-          bodyColor: '#94a3b8',
+          titleColor: theme.tooltipTitle,
+          bodyColor: theme.tooltipBody,
           callbacks: {
-            label: ctx => `Risk Score: ${ctx.parsed.y}`,
+            label: ctx => `Skor Risiko: ${ctx.parsed.y}`,
           },
         },
       },
       scales: {
         x: {
-          grid: { color: CHART_DEFAULTS.gridColor },
+          grid: { color: theme.gridColor },
           ticks: { maxTicksLimit: 8, maxRotation: 30 },
         },
         y: {
           min: 0,
           max: 100,
-          grid: { color: CHART_DEFAULTS.gridColor },
+          grid: { color: theme.gridColor },
           ticks: {
             callback: v => `${v}`,
           },
@@ -124,6 +137,7 @@ function createTrendChart(canvasId, historyData) {
 function createIndicatorRadar(canvasId, latestData) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return null;
+  const theme = chartTheme();
 
   const ctx = canvas.getContext('2d');
   const existing = Chart.getChart(canvasId);
@@ -146,10 +160,10 @@ function createIndicatorRadar(canvasId, latestData) {
       datasets: [{
         label: 'Skor Indikator',
         data: values,
-        backgroundColor: 'rgba(59, 130, 246, 0.15)',
-        borderColor: CHART_DEFAULTS.colors.blue,
+        backgroundColor: theme.colors.tealAlpha,
+        borderColor: theme.colors.teal,
         borderWidth: 2,
-        pointBackgroundColor: CHART_DEFAULTS.colors.blue,
+        pointBackgroundColor: theme.colors.teal,
         pointRadius: 4,
       }],
     },
@@ -165,13 +179,13 @@ function createIndicatorRadar(canvasId, latestData) {
           max: 3,
           ticks: {
             stepSize: 1,
-            color: CHART_DEFAULTS.textColor,
-            backdropColor: 'transparent',
+            color: theme.textColor,
+            backdropColor: cssVar('--transparent'),
           },
-          grid: { color: CHART_DEFAULTS.gridColor },
-          angleLines: { color: CHART_DEFAULTS.gridColor },
+          grid: { color: theme.gridColor },
+          angleLines: { color: theme.gridColor },
           pointLabels: {
-            color: CHART_DEFAULTS.textColor,
+            color: theme.textColor,
             font: { size: 11 },
           },
         },
@@ -188,6 +202,7 @@ function createIndicatorRadar(canvasId, latestData) {
 function createPriorityChart(canvasId, data) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return null;
+  const theme = chartTheme();
 
   const ctx = canvas.getContext('2d');
   const existing = Chart.getChart(canvasId);
@@ -198,10 +213,10 @@ function createPriorityChart(canvasId, data) {
   const scores = top.map(d => parseFloat(d.risk_score || 0).toFixed(1));
   const colors = top.map(d => {
     const s = parseFloat(d.risk_score || 0);
-    if (s < 25) return CHART_DEFAULTS.colors.green;
-    if (s < 50) return CHART_DEFAULTS.colors.yellow;
-    if (s < 75) return CHART_DEFAULTS.colors.orange;
-    return CHART_DEFAULTS.colors.red;
+    if (s < 25) return theme.colors.green;
+    if (s < 50) return theme.colors.yellow;
+    if (s < 75) return theme.colors.orange;
+    return theme.colors.red;
   });
 
   return new Chart(ctx, {
@@ -209,7 +224,7 @@ function createPriorityChart(canvasId, data) {
     data: {
       labels,
       datasets: [{
-        label: 'Risk Score',
+        label: 'Skor Risiko',
         data: scores,
         backgroundColor: colors,
         borderRadius: 4,
@@ -223,11 +238,13 @@ function createPriorityChart(canvasId, data) {
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: '#1a2234',
-          borderColor: 'rgba(99,115,160,0.3)',
+          backgroundColor: theme.tooltipBg,
+          borderColor: theme.tooltipBorder,
           borderWidth: 1,
+          titleColor: theme.tooltipTitle,
+          bodyColor: theme.tooltipBody,
           callbacks: {
-            label: ctx => `Risk Score: ${ctx.parsed.x}`,
+            label: ctx => `Skor Risiko: ${ctx.parsed.x}`,
           },
         },
       },
@@ -235,7 +252,7 @@ function createPriorityChart(canvasId, data) {
         x: {
           min: 0,
           max: 100,
-          grid: { color: CHART_DEFAULTS.gridColor },
+          grid: { color: theme.gridColor },
         },
         y: {
           grid: { display: false },
@@ -249,3 +266,9 @@ function createPriorityChart(canvasId, data) {
 window.createTrendChart = createTrendChart;
 window.createIndicatorRadar = createIndicatorRadar;
 window.createPriorityChart = createPriorityChart;
+
+window.addEventListener('themechange', () => {
+  if (typeof Chart === 'undefined') return;
+  const charts = Object.keys(Chart.instances || {});
+  if (charts.length > 0) window.location.reload();
+});

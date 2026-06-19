@@ -6,6 +6,7 @@ writes to Bronze Delta Lake on HDFS, then triggers processing via API.
 """
 
 import os
+import glob
 import json
 import time
 import uuid
@@ -37,19 +38,36 @@ KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 TOPIC_SURVEY = os.environ.get("KAFKA_TOPIC_SURVEY", "survey-events")
 TOPIC_SECONDARY = os.environ.get("KAFKA_TOPIC_SECONDARY", "secondary-batch")
 HDFS_URL = os.environ.get("HDFS_URL", "hdfs://namenode:9000")
+STORAGE_MODE = os.environ.get("STORAGE_MODE", "auto").lower()
+LOCAL_LAKEHOUSE_DIR = os.environ.get("LOCAL_LAKEHOUSE_DIR", "/data/local_lakehouse")
 API_URL = os.environ.get("API_URL", "http://api:8000")
 SPARK_MASTER = os.environ.get("SPARK_MASTER", "spark://spark:7077")
-SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
-SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "768m")
-SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "512m")
+SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "512m")
+SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "2")
+SPARK_SQL_FILES_MAX_PARTITION_BYTES = os.environ.get("SPARK_SQL_FILES_MAX_PARTITION_BYTES", "32m")
+SPARK_ADVISORY_PARTITION_SIZE = os.environ.get("SPARK_ADVISORY_PARTITION_SIZE", "16m")
+SPARK_DELTA_JARS = os.environ.get("SPARK_DELTA_JARS", "/opt/delta-jars/*")
+try:
+    HDFS_PROBE_RETRIES = max(1, int(os.environ.get("HDFS_PROBE_RETRIES", "12")))
+except ValueError:
+    HDFS_PROBE_RETRIES = 12
+try:
+    HDFS_PROBE_INTERVAL_SECONDS = max(0.1, float(os.environ.get("HDFS_PROBE_INTERVAL_SECONDS", "2.5")))
+except ValueError:
+    HDFS_PROBE_INTERVAL_SECONDS = 2.5
 
 try:
     SPARK_LOCAL_THREADS = max(1, int(os.environ.get("SPARK_LOCAL_THREADS", "1")))
 except ValueError:
     SPARK_LOCAL_THREADS = 1
 
-BRONZE_SURVEY_PATH = f"{HDFS_URL}/data/bronze/survey_events"
-BRONZE_SECONDARY_PATH = f"{HDFS_URL}/data/bronze/secondary_sources"
+SPARK_DEFAULT_PARALLELISM = os.environ.get("SPARK_DEFAULT_PARALLELISM", str(max(1, SPARK_LOCAL_THREADS)))
+
+_lakehouse_root = None
+_storage_backend = "unresolved"
+BRONZE_SURVEY_PATH = None
+BRONZE_SECONDARY_PATH = None
 
 # ============================================================
 # SCHEMAS
@@ -92,6 +110,78 @@ SECONDARY_SCHEMA = StructType([
 ])
 
 
+def resolve_delta_jars():
+    jars = []
+    for pattern in SPARK_DELTA_JARS.split(","):
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        matches = glob.glob(pattern)
+        if matches:
+            jars.extend(matches)
+        elif os.path.exists(pattern):
+            jars.append(pattern)
+    return sorted(set(jars))
+
+
+def configure_delta_builder(builder):
+    jars = resolve_delta_jars()
+    if jars:
+        return builder.config("spark.jars", ",".join(jars))
+    return configure_spark_with_delta_pip(builder)
+
+
+def hdfs_accessible(spark) -> bool:
+    if not HDFS_URL.startswith("hdfs://"):
+        return False
+    last_error = None
+    for attempt in range(1, HDFS_PROBE_RETRIES + 1):
+        try:
+            jvm = spark._jvm
+            conf = spark._jsc.hadoopConfiguration()
+            uri = jvm.java.net.URI(HDFS_URL)
+            fs = jvm.org.apache.hadoop.fs.FileSystem.get(uri, conf)
+            if fs.exists(jvm.org.apache.hadoop.fs.Path("/")):
+                return True
+        except Exception as e:
+            last_error = e
+        if attempt < HDFS_PROBE_RETRIES:
+            time.sleep(HDFS_PROBE_INTERVAL_SECONDS)
+    log.warning("HDFS probe failed after retries, using local lakehouse fallback: %s", last_error)
+    return False
+
+
+def configure_lakehouse_paths(spark):
+    global _lakehouse_root, _storage_backend, BRONZE_SURVEY_PATH, BRONZE_SECONDARY_PATH
+    if _lakehouse_root:
+        return
+
+    local_root = os.path.abspath(LOCAL_LAKEHOUSE_DIR)
+    local_marker = os.path.join(local_root, ".use_local_fallback")
+    if STORAGE_MODE == "local":
+        use_hdfs = False
+    elif STORAGE_MODE == "hdfs":
+        use_hdfs = True
+    elif os.path.exists(local_marker):
+        use_hdfs = False
+    else:
+        use_hdfs = hdfs_accessible(spark)
+
+    if use_hdfs:
+        _storage_backend = "hdfs"
+        _lakehouse_root = f"{HDFS_URL.rstrip('/')}/data"
+    else:
+        _storage_backend = "local"
+        os.makedirs(local_root, exist_ok=True)
+        with open(local_marker, "a", encoding="utf-8"):
+            pass
+        _lakehouse_root = f"file://{local_root}"
+
+    BRONZE_SURVEY_PATH = f"{_lakehouse_root.rstrip('/')}/bronze/survey_events"
+    BRONZE_SECONDARY_PATH = f"{_lakehouse_root.rstrip('/')}/bronze/secondary_sources"
+    log.info("Lakehouse storage backend=%s root=%s", _storage_backend, _lakehouse_root)
+
+
 def create_spark_session():
     """Create PySpark session with Delta Lake support."""
     local_master = f"local[{SPARK_LOCAL_THREADS}]"
@@ -101,19 +191,28 @@ def create_spark_session():
         .master(local_master)  # Local mode - consumer runs in-process
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config("spark.databricks.delta.schema.autoMerge.enabled", "true")
         .config("spark.hadoop.fs.defaultFS", HDFS_URL)
         .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.executor.memory", SPARK_EXECUTOR_MEMORY)
         .config("spark.driver.maxResultSize", "128m")
+        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+        .config("spark.kryoserializer.buffer.max", "128m")
         .config("spark.sql.shuffle.partitions", SPARK_SHUFFLE_PARTITIONS)
-        .config("spark.default.parallelism", SPARK_LOCAL_THREADS)
+        .config("spark.default.parallelism", SPARK_DEFAULT_PARALLELISM)
+        .config("spark.sql.files.maxPartitionBytes", SPARK_SQL_FILES_MAX_PARTITION_BYTES)
+        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", SPARK_ADVISORY_PARTITION_SIZE)
         .config("spark.python.worker.memory", "256m")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
+        .config("spark.locality.wait", "0")
         .config("spark.ui.enabled", "false")
     )
-    return configure_spark_with_delta_pip(builder).getOrCreate()
+    spark = configure_delta_builder(builder).getOrCreate()
+    configure_lakehouse_paths(spark)
+    return spark
 
 
 def write_survey_to_bronze(spark, data: dict):
@@ -185,17 +284,27 @@ def write_secondary_to_bronze(spark, data: dict):
     log.info(f"Written secondary batch {row.batch_id} (type={row.source_type}) to Bronze")
 
 
-def trigger_processing(affected_id: str = ""):
+def trigger_processing(affected_id: str = "", train_model: bool = False, max_retries: int = 5):
     """Notify API to trigger Spark processing jobs."""
-    try:
-        payload = {"affected_ids": [affected_id]} if affected_id else {}
-        resp = requests.post(f"{API_URL}/api/internal/trigger-processing", json=payload, timeout=5)
-        if resp.status_code == 200:
-            log.info("Processing triggered successfully")
-        else:
-            log.warning(f"Trigger returned {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        log.warning(f"Could not trigger processing: {e}")
+    payload = {"affected_ids": [affected_id]} if affected_id else {}
+    if train_model:
+        payload["train_model"] = True
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(f"{API_URL}/api/internal/trigger-processing", json=payload, timeout=10)
+            if resp.status_code == 200:
+                log.info("Processing triggered successfully")
+                return True
+            log.warning(f"Trigger attempt {attempt}/{max_retries} returned {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"Trigger attempt {attempt}/{max_retries} failed: {e}")
+
+        if attempt < max_retries:
+            time.sleep(min(2 ** attempt, 15))
+
+    log.error("Could not trigger processing after retries")
+    return False
 
 
 def wait_for_kafka(max_retries=30, delay=10):
@@ -269,7 +378,7 @@ def main():
             elif topic == TOPIC_SECONDARY:
                 write_secondary_to_bronze(spark, data)
                 affected_id = data.get("id_wilayah", "")
-            trigger_processing(affected_id)
+            trigger_processing(affected_id, train_model=(topic == TOPIC_SECONDARY))
         except Exception as e:
             log.error(f"Error processing message: {e}", exc_info=True)
 

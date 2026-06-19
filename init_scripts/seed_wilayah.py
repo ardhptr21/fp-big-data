@@ -12,6 +12,8 @@ import requests
 import time
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+POST_RETRIES = int(os.environ.get("SEED_POST_RETRIES", "4"))
+POST_TIMEOUT = int(os.environ.get("SEED_POST_TIMEOUT", "30"))
 
 # =============================================================
 # SAMPLE WILAYAH DATA - 5 Kecamatan Surabaya
@@ -219,13 +221,34 @@ def wait_for_api(max_retries=30, delay=5):
     return False
 
 
+def post_with_retry(path, *, json_payload=None, files=None, data=None, timeout=POST_TIMEOUT, retries=POST_RETRIES):
+    """POST to the API with bounded retries for transient startup/load failures."""
+    url = f"{API_URL}{path}"
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.post(url, json=json_payload, files=files, data=data, timeout=timeout)
+            if resp.status_code not in (408, 429, 500, 502, 503, 504):
+                return resp, None
+            last_error = f"{resp.status_code} {resp.text[:100]}"
+        except requests.RequestException as e:
+            last_error = str(e)
+
+        if attempt < retries:
+            sleep_for = min(2 ** attempt, 15)
+            print(f"    retry {attempt}/{retries - 1} in {sleep_for}s: {last_error}")
+            time.sleep(sleep_for)
+
+    return None, last_error
+
+
 def seed_wilayah():
     """POST each wilayah to the API."""
     print("\n=== Seeding wilayah data ===")
     success = 0
     for w in WILAYAH_DATA:
-        try:
-            resp = requests.post(f"{API_URL}/api/wilayah", json=w, timeout=10)
+        resp, error = post_with_retry("/api/wilayah", json_payload=w)
+        if resp is not None:
             if resp.status_code in (200, 201):
                 print(f"  ✓ {w['id_wilayah']}")
                 success += 1
@@ -234,8 +257,8 @@ def seed_wilayah():
                 success += 1
             else:
                 print(f"  ✗ {w['id_wilayah']}: {resp.status_code} {resp.text[:100]}")
-        except Exception as e:
-            print(f"  ✗ {w['id_wilayah']}: {e}")
+        else:
+            print(f"  ✗ {w['id_wilayah']}: {error}")
     print(f"  Seeded {success}/{len(WILAYAH_DATA)} wilayah")
 
 
@@ -251,16 +274,18 @@ def save_ground_truth_csv():
     # Upload via API
     try:
         with open(path, "rb") as f:
-            resp = requests.post(
-                f"{API_URL}/api/secondary/upload",
+            resp, error = post_with_retry(
+                "/api/secondary/upload",
                 files={"file": ("ground_truth.csv", f, "text/csv")},
-                data={"source_type": "ground_truth"},
-                timeout=30
+                data={"source_type": "ground_truth", "idempotency_key": "seed-ground-truth-v1"},
+                timeout=POST_TIMEOUT,
             )
-        if resp.status_code in (200, 201):
+        if resp is not None and resp.status_code in (200, 201):
             print("  ✓ Ground truth uploaded to API")
-        else:
+        elif resp is not None:
             print(f"  ~ Ground truth upload: {resp.status_code} {resp.text[:100]}")
+        else:
+            print(f"  ~ Could not upload ground truth via API: {error}")
     except Exception as e:
         print(f"  ~ Could not upload ground truth via API: {e}")
 
@@ -345,14 +370,15 @@ def seed_sample_survey_data():
     ]
 
     for event in sample_events:
-        try:
-            resp = requests.post(f"{API_URL}/api/survey", json=event, timeout=10)
+        event = {**event, "idempotency_key": f"seed-survey-{event['id_wilayah']}-v1"}
+        resp, error = post_with_retry("/api/survey", json_payload=event)
+        if resp is not None:
             if resp.status_code in (200, 201):
                 print(f"  ✓ Survey event for {event['id_wilayah']}")
             else:
                 print(f"  ✗ {event['id_wilayah']}: {resp.status_code} {resp.text[:100]}")
-        except Exception as e:
-            print(f"  ✗ {event['id_wilayah']}: {e}")
+        else:
+            print(f"  ✗ {event['id_wilayah']}: {error}")
         time.sleep(0.5)
 
 

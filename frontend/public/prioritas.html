@@ -3,10 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Prioritas Intervensi — SlumMap Surabaya</title>
-  <meta name="description" content="Ranking prioritas intervensi penanganan permukiman kumuh berdasarkan risk score dan jiwa terdampak.">
+  <title>Prioritas Intervensi | SlumMap Surabaya</title>
+  <meta name="description" content="Peringkat prioritas intervensi penanganan permukiman kumuh berdasarkan skor risiko dan jiwa terdampak.">
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="/js/theme.js"></script>
+  <script src="/js/pipeline-status.js"></script>
+  <script src="/js/api-cache.js"></script>
   <link rel="stylesheet" href="/css/style.css">
   <style>
     .priority-page {
@@ -26,9 +29,9 @@
       font-size: 0.875rem;
     }
 
-    .rank-1 { background: linear-gradient(135deg, #f59e0b, #fbbf24); color: #000; }
-    .rank-2 { background: linear-gradient(135deg, #94a3b8, #cbd5e1); color: #000; }
-    .rank-3 { background: linear-gradient(135deg, #cd7c2c, #d97706); color: #fff; }
+    .rank-1 { background: var(--risk-sedang-bg); color: var(--risk-sedang); border: 1px solid var(--risk-sedang-border); }
+    .rank-2 { background: var(--civic-blue-soft); color: var(--civic-blue); border: 1px solid var(--accent-blue-glow); }
+    .rank-3 { background: var(--civic-clay-soft); color: var(--civic-clay); border: 1px solid var(--risk-berat-border); }
     .rank-other { background: var(--bg-primary); color: var(--text-muted); border: 1px solid var(--border); }
   </style>
 </head>
@@ -36,14 +39,14 @@
 
 <nav class="nav">
   <a href="/" class="nav-brand">
-    <div class="nav-brand-icon">🗺️</div>
+    <div class="nav-brand-icon">GIS</div>
     <span>SlumMap Surabaya</span>
   </a>
   <ul class="nav-links">
-    <li><a href="/">🗺️ Peta Utama</a></li>
-    <li><a href="/input.html">📝 Input Data</a></li>
-    <li><a href="/prioritas.html" class="active">🚨 Prioritas</a></li>
-    <li><a href="/register.html">➕ Wilayah Baru</a></li>
+    <li><a href="/">Peta Utama</a></li>
+    <li><a href="/input.html">Isi Survei</a></li>
+    <li><a href="/prioritas.html" class="active">Prioritas</a></li>
+    <li><a href="/register.html">Wilayah Baru</a></li>
   </ul>
 </nav>
 
@@ -51,38 +54,38 @@
   <div class="priority-page">
 
     <div class="page-header">
-      <h1 class="page-title">🚨 Prioritas Intervensi</h1>
-      <p class="page-subtitle">Ranking berdasarkan skor risiko × jiwa terdampak. Data diperbarui setiap kali ada survei baru.</p>
+      <h1 class="page-title">Prioritas Intervensi</h1>
+      <p class="page-subtitle">Peringkat berdasarkan skor risiko dan jiwa terdampak. Data diperbarui setiap kali ada survei baru.</p>
     </div>
 
     <!-- Summary Stats -->
     <div class="stat-grid" style="margin-bottom:1.5rem;">
       <div class="stat-card danger">
-        <div class="stat-label">Total Kumuh</div>
-        <div class="stat-value" id="stat-kumuh">—</div>
+        <div class="stat-label">Jumlah Kumuh</div>
+        <div class="stat-value" id="stat-kumuh">--</div>
         <div class="stat-sub">wilayah teridentifikasi</div>
       </div>
       <div class="stat-card warning">
         <div class="stat-label">Jiwa Terdampak</div>
-        <div class="stat-value" id="stat-jiwa">—</div>
+        <div class="stat-value" id="stat-jiwa">--</div>
         <div class="stat-sub">total jiwa di wilayah kumuh</div>
       </div>
       <div class="stat-card info">
-        <div class="stat-label">Avg Risk Score</div>
-        <div class="stat-value" id="stat-avg-risk">—</div>
+        <div class="stat-label">Rata-rata Skor Risiko</div>
+        <div class="stat-value" id="stat-avg-risk">--</div>
         <div class="stat-sub">rata-rata seluruh wilayah</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Total Survey Events</div>
-        <div class="stat-value" id="stat-events">—</div>
-        <div class="stat-sub">data survei teringest</div>
+        <div class="stat-label">Jumlah Data Survei</div>
+        <div class="stat-value" id="stat-events">--</div>
+        <div class="stat-sub">data survei tercatat</div>
       </div>
     </div>
 
     <!-- Chart -->
     <div class="card" style="margin-bottom:1.5rem;">
       <div class="card-header">
-        <span class="card-title">📊 Top 10 Wilayah Risiko Tertinggi</span>
+        <span class="card-title">10 Wilayah dengan Risiko Tertinggi</span>
       </div>
       <div class="card-body">
         <div class="chart-container" style="height:300px;">
@@ -100,32 +103,32 @@
       </div>
       <div class="form-group" style="flex:1;max-width:200px;margin:0;">
         <select class="form-control" id="filter-level" style="font-size:0.8125rem;">
-          <option value="">Semua Level Risiko</option>
+          <option value="">Semua Tingkat Risiko</option>
           <option value="Sangat Berat">Sangat Berat</option>
           <option value="Berat">Berat</option>
           <option value="Sedang">Sedang</option>
           <option value="Ringan">Ringan</option>
         </select>
       </div>
-      <button class="btn btn-secondary btn-sm" onclick="exportCSV()">📥 Export CSV</button>
+      <button class="btn btn-secondary btn-sm" onclick="exportCSV()">Ekspor CSV</button>
     </div>
 
     <!-- Priority Table -->
     <div class="card">
       <div class="card-header">
-        <span class="card-title">📋 Daftar Prioritas Intervensi</span>
+        <span class="card-title">Daftar Prioritas Intervensi</span>
         <span id="table-count" style="font-size:0.75rem;color:var(--text-muted);"></span>
       </div>
       <div class="table-container">
         <table id="priority-table">
           <thead>
             <tr>
-              <th>Rank</th>
+              <th>Peringkat</th>
               <th>ID Wilayah</th>
               <th>Kelurahan</th>
               <th>Kecamatan</th>
-              <th>Risk Score</th>
-              <th>Risk Level</th>
+              <th>Skor Risiko</th>
+              <th>Tingkat Risiko</th>
               <th>Prob. Kumuh</th>
               <th>Jiwa</th>
               <th>Faktor Utama</th>
@@ -156,6 +159,14 @@ const API_BASE = '/api';
 let allData = [];
 let filteredData = [];
 
+function getJSON(url, options = {}) {
+  if (window.apiCache?.getJSON) return window.apiCache.getJSON(url, options);
+  return fetch(url).then(res => {
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    return res.json();
+  });
+}
+
 function getBadgeClass(level) {
   const m = {'Ringan':'badge-ringan','Sedang':'badge-sedang','Berat':'badge-berat','Sangat Berat':'badge-sangat-berat'};
   return m[level] || 'badge-none';
@@ -170,45 +181,60 @@ function getRankBadge(rank) {
 
 async function loadPriority() {
   try {
-    const [prioRes, sumRes] = await Promise.all([
-      fetch(`${API_BASE}/priority`),
-      fetch(`${API_BASE}/summary`),
+    const [prioData, sumData] = await Promise.all([
+      getJSON(`${API_BASE}/priority`, {
+        ttl: 60 * 1000,
+        staleTtl: 24 * 60 * 60 * 1000,
+        onUpdate: data => applyPriorityData(data, null),
+      }),
+      getJSON(`${API_BASE}/summary`, {
+        ttl: 60 * 1000,
+        staleTtl: 24 * 60 * 60 * 1000,
+        onUpdate: data => applyPriorityData(null, data),
+      }),
     ]);
 
-    const prioData = await prioRes.json();
-    const sumData = sumRes.ok ? await sumRes.json() : {};
-
-    allData = prioData.priority || [];
-    filteredData = [...allData];
-
-    // Stats
-    const setEl = (id, v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
-    setEl('stat-kumuh', (sumData.total_kumuh || 0).toLocaleString('id-ID'));
-    setEl('stat-jiwa', (sumData.total_jiwa_terdampak || 0).toLocaleString('id-ID'));
-    setEl('stat-events', (sumData.total_survey_events || 0).toLocaleString('id-ID'));
-
-    if (allData.length > 0) {
-      const avg = allData.reduce((s,r) => s + parseFloat(r.risk_score||0), 0) / allData.length;
-      setEl('stat-avg-risk', avg.toFixed(1));
-    }
-
-    // Populate kecamatan filter
-    const kecs = [...new Set(allData.map(r => r.kecamatan).filter(Boolean))].sort();
-    const sel = document.getElementById('filter-kecamatan');
-    kecs.forEach(k => {
-      const opt = document.createElement('option');
-      opt.value = k; opt.textContent = k;
-      sel.appendChild(opt);
-    });
-
-    renderTable();
-    renderChart();
+    applyPriorityData(prioData, sumData);
 
   } catch (e) {
     console.error(e);
     document.getElementById('priority-tbody').innerHTML =
       `<tr><td colspan="10" style="text-align:center;color:var(--text-muted);">Gagal memuat data: ${e.message}</td></tr>`;
   }
+}
+
+function applyPriorityData(prioData, sumData) {
+  if (prioData) {
+    allData = prioData.priority || [];
+    filteredData = [...allData];
+  }
+
+  if (sumData) {
+    const setEl = (id, v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
+    setEl('stat-kumuh', (sumData.total_kumuh || 0).toLocaleString('id-ID'));
+    setEl('stat-jiwa', (sumData.total_jiwa_terdampak || 0).toLocaleString('id-ID'));
+    setEl('stat-events', (sumData.total_survey_events || 0).toLocaleString('id-ID'));
+  }
+
+  if (allData.length > 0) {
+    const avg = allData.reduce((s,r) => s + parseFloat(r.risk_score||0), 0) / allData.length;
+    const avgEl = document.getElementById('stat-avg-risk');
+    if (avgEl) avgEl.textContent = avg.toFixed(1);
+  }
+
+  const kecs = [...new Set(allData.map(r => r.kecamatan).filter(Boolean))].sort();
+  const sel = document.getElementById('filter-kecamatan');
+  const selectedKec = sel.value;
+  sel.innerHTML = '<option value="">Semua Kecamatan</option>';
+  kecs.forEach(k => {
+    const opt = document.createElement('option');
+    opt.value = k; opt.textContent = k;
+    sel.appendChild(opt);
+  });
+  if (kecs.includes(selectedKec)) sel.value = selectedKec;
+
+  renderTable();
+  renderChart();
 }
 
 function renderTable() {
@@ -232,17 +258,17 @@ function renderTable() {
   tbody.innerHTML = filteredData.map((r, i) => {
     const rank = r.prioritas_rank || (i + 1);
     const score = parseFloat(r.risk_score || 0).toFixed(1);
-    const proba = r.proba_kumuh != null ? `${(r.proba_kumuh * 100).toFixed(1)}%` : '—';
+    const proba = r.proba_kumuh != null ? `${(r.proba_kumuh * 100).toFixed(1)}%` : '--';
     const jiwa = (r.jiwa_terdampak || 0).toLocaleString('id-ID');
     const level = r.risk_level || 'Belum Didata';
-    const factors = [r.top_faktor_1, r.top_faktor_2, r.top_faktor_3].filter(Boolean).join(', ') || '—';
+    const factors = [r.top_faktor_1, r.top_faktor_2, r.top_faktor_3].filter(Boolean).join(', ') || '--';
 
     return `
       <tr>
         <td>${getRankBadge(rank)}</td>
-        <td style="font-family:monospace;font-size:0.75rem;">${r.id_wilayah || '—'}</td>
-        <td class="td-primary">${r.kelurahan || '—'}</td>
-        <td>${r.kecamatan || '—'}</td>
+        <td style="font-family:monospace;font-size:0.75rem;">${r.id_wilayah || '--'}</td>
+        <td class="td-primary">${r.kelurahan || '--'}</td>
+        <td>${r.kecamatan || '--'}</td>
         <td>
           <div style="display:flex;align-items:center;gap:0.5rem;">
             <span class="td-primary" style="font-weight:700;">${score}</span>
@@ -256,7 +282,7 @@ function renderTable() {
         <td>${jiwa}</td>
         <td style="font-size:0.75rem;color:var(--text-secondary);max-width:200px;">${factors}</td>
         <td>
-          <a href="/wilayah.html?id=${encodeURIComponent(r.id_wilayah || '')}" class="btn btn-secondary btn-sm">📊 Detail</a>
+          <a href="/wilayah.html?id=${encodeURIComponent(r.id_wilayah || '')}" class="btn btn-secondary btn-sm">Rincian</a>
         </td>
       </tr>
     `;
@@ -276,7 +302,7 @@ function renderChart() {
 
 function exportCSV() {
   if (filteredData.length === 0) return;
-  const headers = ['Rank','ID Wilayah','Kelurahan','Kecamatan','Risk Score','Risk Level','Prob Kumuh','Jiwa','Faktor 1','Faktor 2','Faktor 3'];
+  const headers = ['Peringkat','ID Wilayah','Kelurahan','Kecamatan','Skor Risiko','Tingkat Risiko','Probabilitas Kumuh','Jiwa','Faktor 1','Faktor 2','Faktor 3'];
   const rows = filteredData.map(r => [
     r.prioritas_rank||'',r.id_wilayah||'',r.kelurahan||'',r.kecamatan||'',
     parseFloat(r.risk_score||0).toFixed(1),r.risk_level||'',
@@ -294,6 +320,7 @@ function exportCSV() {
 document.getElementById('filter-kecamatan').addEventListener('change', renderTable);
 document.getElementById('filter-level').addEventListener('change', renderTable);
 document.addEventListener('DOMContentLoaded', loadPriority);
+window.addEventListener('pipeline:complete', loadPriority);
 </script>
 </body>
 </html>

@@ -1,8 +1,16 @@
 /**
- * wilayah.js — Wilayah history page logic
+ * wilayah.js - Wilayah history page logic
  */
 
 const API_BASE = '/api';
+
+function getJSON(url, options = {}) {
+  if (window.apiCache?.getJSON) return window.apiCache.getJSON(url, options);
+  return fetch(url).then(res => {
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    return res.json();
+  });
+}
 
 function getWilayahIdFromUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -19,13 +27,25 @@ async function loadWilayahHistory() {
   document.getElementById('wilayah-id-display').textContent = id;
 
   try {
-    const [histRes, latestRes] = await Promise.all([
-      fetch(`${API_BASE}/wilayah/${encodeURIComponent(id)}/history`),
-      fetch(`${API_BASE}/wilayah/${encodeURIComponent(id)}/latest`),
+    const historyUrl = `${API_BASE}/wilayah/${encodeURIComponent(id)}/history`;
+    const latestUrl = `${API_BASE}/wilayah/${encodeURIComponent(id)}/latest`;
+    const [histData, latestData] = await Promise.all([
+      getJSON(historyUrl, {
+        ttl: 60 * 1000,
+        staleTtl: 24 * 60 * 60 * 1000,
+        onUpdate: data => renderHistory(data.history || []),
+      }),
+      getJSON(latestUrl, {
+        ttl: 60 * 1000,
+        staleTtl: 24 * 60 * 60 * 1000,
+        onUpdate: data => {
+          renderHeader(id, data);
+          if (typeof createIndicatorRadar === 'function') {
+            createIndicatorRadar('radar-chart', data);
+          }
+        },
+      }).catch(() => null),
     ]);
-
-    const histData = await histRes.json();
-    const latestData = latestRes.ok ? await latestRes.json() : null;
 
     renderHeader(id, latestData);
     renderHistory(histData.history || []);
@@ -47,7 +67,7 @@ function renderHeader(id, latest) {
   const rw = latest.rw || '';
   const kel = latest.kelurahan || '';
   const kec = latest.kecamatan || '';
-  el.textContent = `RT ${rt} / RW ${rw} — ${kel} — ${kec}`;
+  el.textContent = `RT ${rt} / RW ${rw} - ${kel} - ${kec}`;
 
   // Latest score card
   const scoreEl = document.getElementById('latest-score');
@@ -73,7 +93,7 @@ function getBadgeClass(level) {
 }
 
 function formatDate(dt) {
-  if (!dt) return '—';
+  if (!dt) return '--';
   try {
     return new Date(dt).toLocaleString('id-ID', {
       day: '2-digit', month: 'short', year: 'numeric',
@@ -92,15 +112,14 @@ function scoreBadge(v) {
 function renderHistory(history) {
   const tbody = document.getElementById('history-table-body');
   const countEl = document.getElementById('history-count');
-  if (countEl) countEl.textContent = `${history.length} event`;
+  if (countEl) countEl.textContent = `${history.length} survei`;
 
   if (history.length === 0) {
     tbody.innerHTML = `
       <tr><td colspan="10">
         <div class="empty-state">
-          <div class="empty-icon">📭</div>
           <div class="empty-title">Belum ada data survei</div>
-          <div class="empty-msg">Submit data survei pertama untuk wilayah ini.</div>
+          <div class="empty-msg">Kirim data survei pertama untuk wilayah ini.</div>
         </div>
       </td></tr>
     `;
@@ -108,7 +127,7 @@ function renderHistory(history) {
   }
 
   tbody.innerHTML = history.map((h, i) => {
-    const score = h.risk_score_saat_itu ?? h.risk_score ?? '—';
+    const score = h.risk_score_saat_itu ?? h.risk_score ?? '--';
     const level = h.risk_level_saat_itu ?? h.risk_level ?? 'Belum Didata';
     return `
       <tr>
@@ -122,8 +141,8 @@ function renderHistory(history) {
         <td>${scoreBadge(h.skor_air_minum)}</td>
         <td class="td-primary">${parseFloat(score).toFixed(1)}</td>
         <td><span class="badge ${getBadgeClass(level)}">${level}</span></td>
-        <td style="color:var(--text-muted);font-size:0.75rem;">${h.catatan || '—'}</td>
-        <td style="color:var(--text-muted);font-size:0.75rem;">${h.recorded_by || '—'}</td>
+        <td style="color:var(--text-muted);font-size:0.75rem;">${h.catatan || '--'}</td>
+        <td style="color:var(--text-muted);font-size:0.75rem;">${h.recorded_by || '--'}</td>
       </tr>
     `;
   }).join('');
@@ -139,3 +158,14 @@ function renderCharts(history, latest) {
 }
 
 document.addEventListener('DOMContentLoaded', loadWilayahHistory);
+window.addEventListener('pipeline:complete', (event) => {
+  const id = getWilayahIdFromUrl();
+  const affected = [
+    ...(event.detail?.affected_ids || []),
+    ...(event.detail?.pipeline?.affected_ids || []),
+    ...(event.detail?.pipeline?.all_affected_ids || []),
+  ].filter(Boolean);
+  if (!id || affected.length === 0 || affected.includes(id)) {
+    loadWilayahHistory();
+  }
+});

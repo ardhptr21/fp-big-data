@@ -5,6 +5,7 @@ Geospatial Big Data Analytics untuk Pemetaan Permukiman Kumuh Surabaya
 """
 
 import os
+import glob
 import json
 import uuid
 import asyncio
@@ -31,24 +32,58 @@ log = logging.getLogger(__name__)
 # CONFIG
 # ============================================================
 HDFS_URL = os.environ.get("HDFS_URL", "hdfs://namenode:9000")
+STORAGE_MODE = os.environ.get("STORAGE_MODE", "auto").lower()
+LOCAL_LAKEHOUSE_DIR = os.environ.get("LOCAL_LAKEHOUSE_DIR", "/data/local_lakehouse")
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "kafka:9092")
 TOPIC_SURVEY = os.environ.get("KAFKA_TOPIC_SURVEY", "survey-events")
 TOPIC_SECONDARY = os.environ.get("KAFKA_TOPIC_SECONDARY", "secondary-batch")
 SPARK_MASTER = os.environ.get("SPARK_MASTER", "spark://spark:7077")
 SPARK_JOBS_PATH = os.environ.get("SPARK_JOBS_PATH", "/opt/spark_jobs")
-SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
-SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "768m")
-SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "512m")
+SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "512m")
+SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "2")
+SPARK_SQL_FILES_MAX_PARTITION_BYTES = os.environ.get("SPARK_SQL_FILES_MAX_PARTITION_BYTES", "32m")
+SPARK_ADVISORY_PARTITION_SIZE = os.environ.get("SPARK_ADVISORY_PARTITION_SIZE", "16m")
+SPARK_DELTA_JARS = os.environ.get("SPARK_DELTA_JARS", "/opt/delta-jars/*")
+try:
+    HDFS_PROBE_RETRIES = max(1, int(os.environ.get("HDFS_PROBE_RETRIES", "12")))
+except ValueError:
+    HDFS_PROBE_RETRIES = 12
+try:
+    HDFS_PROBE_INTERVAL_SECONDS = max(0.1, float(os.environ.get("HDFS_PROBE_INTERVAL_SECONDS", "2.5")))
+except ValueError:
+    HDFS_PROBE_INTERVAL_SECONDS = 2.5
 
 try:
     SPARK_LOCAL_THREADS = max(1, int(os.environ.get("SPARK_LOCAL_THREADS", "1")))
 except ValueError:
     SPARK_LOCAL_THREADS = 1
 
+SPARK_DEFAULT_PARALLELISM = os.environ.get("SPARK_DEFAULT_PARALLELISM", str(max(1, SPARK_LOCAL_THREADS)))
+
 try:
-    PIPELINE_DEBOUNCE_SECONDS = max(0.0, float(os.environ.get("PIPELINE_DEBOUNCE_SECONDS", "15")))
+    PIPELINE_DEBOUNCE_SECONDS = max(0.0, float(os.environ.get("PIPELINE_DEBOUNCE_SECONDS", "2")))
 except ValueError:
-    PIPELINE_DEBOUNCE_SECONDS = 15.0
+    PIPELINE_DEBOUNCE_SECONDS = 2.0
+
+FORCE_TRAIN_EVERY_RUN = os.environ.get("FORCE_TRAIN_EVERY_RUN", "false").lower() in {"1", "true", "yes"}
+
+try:
+    JOB1_EXPECTED_SECONDS = max(1, int(os.environ.get("JOB1_EXPECTED_SECONDS", "35")))
+except ValueError:
+    JOB1_EXPECTED_SECONDS = 35
+try:
+    JOB2_EXPECTED_SECONDS = max(1, int(os.environ.get("JOB2_EXPECTED_SECONDS", "55")))
+except ValueError:
+    JOB2_EXPECTED_SECONDS = 55
+try:
+    JOB3_EXPECTED_SECONDS = max(1, int(os.environ.get("JOB3_EXPECTED_SECONDS", "45")))
+except ValueError:
+    JOB3_EXPECTED_SECONDS = 45
+try:
+    PROGRESS_TICK_SECONDS = max(0.25, float(os.environ.get("PROGRESS_TICK_SECONDS", "0.75")))
+except ValueError:
+    PROGRESS_TICK_SECONDS = 0.75
 
 # SSE event queue
 sse_clients: List[asyncio.Queue] = []
@@ -57,6 +92,8 @@ sse_clients: List[asyncio.Queue] = []
 _cache: Dict[str, Any] = {}
 _cache_ts: Dict[str, float] = {}
 CACHE_TTL = 30  # seconds
+_lakehouse_root: Optional[str] = None
+_storage_backend = "unresolved"
 
 # Single-flight Spark pipeline state. Requests are debounced and coalesced so
 # low-memory machines do not run multiple PySpark driver processes at once.
@@ -65,17 +102,27 @@ _pipeline_task: Optional[asyncio.Task] = None
 _pipeline_pending = False
 _pipeline_last_requested = 0.0
 _pipeline_affected_ids: set[str] = set()
+_pipeline_running_affected_ids: set[str] = set()
+_pipeline_train_requested = False
+_pipeline_cancel_requested = False
+_current_job_process: Optional[subprocess.Popen] = None
 _pipeline_state: Dict[str, Any] = {
     "state": "idle",
     "running": False,
     "pending": False,
     "version": 0,
+    "phase": "idle",
+    "phase_label": "Siap menerima pembaruan",
+    "progress": 0,
     "last_requested_at": None,
     "last_started_at": None,
     "last_completed_at": None,
     "last_error": None,
     "jobs_ok": {},
     "affected_ids": [],
+    "pending_affected_ids": [],
+    "running_affected_ids": [],
+    "train_model_requested": False,
 }
 
 # ============================================================
@@ -122,6 +169,7 @@ class WilayahCreate(BaseModel):
 
 class SurveyEvent(BaseModel):
     id_wilayah: str
+    idempotency_key: Optional[str] = None
     recorded_by: Optional[str] = ""
     skor_bangunan: int = Field(ge=0, le=3)
     skor_jalan: int = Field(ge=0, le=3)
@@ -140,6 +188,7 @@ class SurveyEvent(BaseModel):
 
 class PipelineTrigger(BaseModel):
     affected_ids: List[str] = Field(default_factory=list)
+    train_model: bool = False
 
 
 # ============================================================
@@ -166,10 +215,92 @@ def produce_kafka_message(topic: str, message: dict):
 # ============================================================
 # HELPER: Spark / Delta Lake reads
 # ============================================================
+def resolve_delta_jars() -> List[str]:
+    jars = []
+    for pattern in SPARK_DELTA_JARS.split(","):
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        matches = glob.glob(pattern)
+        if matches:
+            jars.extend(matches)
+        elif os.path.exists(pattern):
+            jars.append(pattern)
+    return sorted(set(jars))
+
+
+def configure_delta_builder(builder):
+    jars = resolve_delta_jars()
+    if jars:
+        return builder.config("spark.jars", ",".join(jars))
+
+    # Local development fallback. The Docker image bakes these jars so API and
+    # Spark jobs do not resolve Maven packages at runtime.
+    from delta import configure_spark_with_delta_pip
+    return configure_spark_with_delta_pip(builder)
+
+
+def hdfs_accessible(spark) -> bool:
+    if not HDFS_URL.startswith("hdfs://"):
+        return False
+    last_error = None
+    for attempt in range(1, HDFS_PROBE_RETRIES + 1):
+        try:
+            jvm = spark._jvm
+            conf = spark._jsc.hadoopConfiguration()
+            uri = jvm.java.net.URI(HDFS_URL)
+            fs = jvm.org.apache.hadoop.fs.FileSystem.get(uri, conf)
+            if fs.exists(jvm.org.apache.hadoop.fs.Path("/")):
+                return True
+        except Exception as e:
+            last_error = e
+        if attempt < HDFS_PROBE_RETRIES:
+            time.sleep(HDFS_PROBE_INTERVAL_SECONDS)
+    log.warning("HDFS probe failed after retries, using local lakehouse fallback: %s", last_error)
+    return False
+
+
+def configure_lakehouse_root(spark) -> str:
+    """Resolve HDFS-first lakehouse root, falling back to shared local storage."""
+    global _lakehouse_root, _storage_backend
+    if _lakehouse_root:
+        return _lakehouse_root
+
+    local_root = os.path.abspath(LOCAL_LAKEHOUSE_DIR)
+    local_marker = os.path.join(local_root, ".use_local_fallback")
+    if STORAGE_MODE == "local":
+        use_hdfs = False
+    elif STORAGE_MODE == "hdfs":
+        use_hdfs = True
+    elif os.path.exists(local_marker):
+        use_hdfs = False
+    else:
+        use_hdfs = hdfs_accessible(spark)
+
+    if use_hdfs:
+        _storage_backend = "hdfs"
+        _lakehouse_root = f"{HDFS_URL.rstrip('/')}/data"
+    else:
+        _storage_backend = "local"
+        os.makedirs(local_root, exist_ok=True)
+        with open(local_marker, "a", encoding="utf-8"):
+            pass
+        _lakehouse_root = f"file://{local_root}"
+
+    log.info("Lakehouse storage backend=%s root=%s", _storage_backend, _lakehouse_root)
+    return _lakehouse_root
+
+
+def lakehouse_path(relative_path: str) -> str:
+    """Return an absolute Delta path under the resolved lakehouse root."""
+    spark = get_spark()
+    root = configure_lakehouse_root(spark).rstrip("/")
+    return f"{root}/{relative_path.lstrip('/')}"
+
+
 def get_spark():
     """Get or create SparkSession (lazy singleton)."""
     from pyspark.sql import SparkSession
-    from delta import configure_spark_with_delta_pip
 
     builder = (
         SparkSession.builder
@@ -177,18 +308,27 @@ def get_spark():
         .master(f"local[{SPARK_LOCAL_THREADS}]")  # local mode - API runs Spark in-process
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config("spark.databricks.delta.schema.autoMerge.enabled", "true")
         .config("spark.hadoop.fs.defaultFS", HDFS_URL)
         .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
-        .config("spark.driver.memory", "512m")
+        .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.driver.maxResultSize", "128m")
+        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+        .config("spark.kryoserializer.buffer.max", "128m")
         .config("spark.sql.shuffle.partitions", SPARK_SHUFFLE_PARTITIONS)
-        .config("spark.default.parallelism", max(1, int(SPARK_LOCAL_THREADS)))
+        .config("spark.default.parallelism", SPARK_DEFAULT_PARALLELISM)
+        .config("spark.sql.files.maxPartitionBytes", SPARK_SQL_FILES_MAX_PARTITION_BYTES)
+        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", SPARK_ADVISORY_PARTITION_SIZE)
         .config("spark.python.worker.memory", "256m")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
+        .config("spark.locality.wait", "0")
         .config("spark.ui.enabled", "false")
     )
-    return configure_spark_with_delta_pip(builder).getOrCreate()
+    spark = configure_delta_builder(builder).getOrCreate()
+    configure_lakehouse_root(spark)
+    return spark
 
 
 def read_delta(path: str) -> Optional[list]:
@@ -376,13 +516,25 @@ async def broadcast_sse(event_type: str, data: Optional[dict] = None):
 
 def pipeline_status_payload() -> dict:
     payload = dict(_pipeline_state)
+    pending_ids = sorted(_pipeline_affected_ids)
+    running_ids = sorted(_pipeline_running_affected_ids)
     payload["pending"] = _pipeline_pending
-    payload["running"] = _pipeline_lock.locked() or payload.get("state") in {"queued", "running"}
-    payload["affected_ids"] = sorted(set(payload.get("affected_ids") or []) | _pipeline_affected_ids)
+    payload["running"] = payload.get("state") == "running"
+    payload["pending_affected_ids"] = pending_ids
+    payload["running_affected_ids"] = running_ids
+    if payload["running"]:
+        payload["affected_ids"] = running_ids
+    elif payload["pending"]:
+        payload["affected_ids"] = pending_ids
+    else:
+        payload["affected_ids"] = sorted(payload.get("affected_ids") or [])
+    payload["all_affected_ids"] = sorted(set(payload.get("affected_ids") or []) | set(pending_ids) | set(running_ids))
+    payload["train_model_requested"] = bool(payload.get("train_model_requested") or _pipeline_train_requested)
     return payload
 
 
 def set_pipeline_state(state: str, **extra):
+    previous_state = _pipeline_state.get("state")
     _pipeline_state["state"] = state
     _pipeline_state["last_event_at"] = datetime.utcnow().isoformat()
     if state in {"queued", "running"}:
@@ -390,13 +542,29 @@ def set_pipeline_state(state: str, **extra):
     if state == "queued":
         _pipeline_state["last_requested_at"] = _pipeline_state["last_event_at"]
     elif state == "running":
-        _pipeline_state["last_started_at"] = _pipeline_state["last_event_at"]
+        if previous_state != "running":
+            _pipeline_state["last_started_at"] = _pipeline_state["last_event_at"]
         _pipeline_state["last_error"] = None
-    elif state in {"succeeded", "failed"}:
+    elif state in {"succeeded", "failed", "cancelled"}:
         _pipeline_state["running"] = False
         _pipeline_state["last_completed_at"] = _pipeline_state["last_event_at"]
-        _pipeline_state["version"] = int(_pipeline_state.get("version") or 0) + 1
+        if state in {"succeeded", "failed"}:
+            _pipeline_state["version"] = int(_pipeline_state.get("version") or 0) + 1
     _pipeline_state.update(extra)
+
+
+async def publish_pipeline_progress(phase: str, label: str, progress: float):
+    bounded_progress = round(max(0.0, min(100.0, float(progress))), 1)
+    set_pipeline_state(
+        "running",
+        phase=phase,
+        phase_label=label,
+        progress=bounded_progress,
+        affected_ids=sorted(_pipeline_running_affected_ids),
+        pending_affected_ids=sorted(_pipeline_affected_ids),
+        running_affected_ids=sorted(_pipeline_running_affected_ids),
+    )
+    await broadcast_sse("processing_progress", {"pipeline": pipeline_status_payload()})
 
 
 # ============================================================
@@ -404,54 +572,126 @@ def set_pipeline_state(state: str, **extra):
 # ============================================================
 def run_spark_job(job_file: str) -> bool:
     """Run a Spark job Python script directly (via python)."""
+    global _current_job_process
     job_path = os.path.join(SPARK_JOBS_PATH, job_file)
     if not os.path.exists(job_path):
         log.error(f"Spark job not found: {job_path}")
         return False
 
+    configure_lakehouse_root(get_spark())
+    active_storage_mode = _storage_backend if _storage_backend in {"hdfs", "local"} else STORAGE_MODE
+
     env = os.environ.copy()
     env.update({
         "HDFS_URL": HDFS_URL,
+        "STORAGE_MODE": active_storage_mode,
+        "LOCAL_LAKEHOUSE_DIR": LOCAL_LAKEHOUSE_DIR,
         "SPARK_MASTER": SPARK_MASTER,
         "SPARK_LOCAL_THREADS": str(SPARK_LOCAL_THREADS),
         "SPARK_DRIVER_MEMORY": SPARK_DRIVER_MEMORY,
         "SPARK_EXECUTOR_MEMORY": SPARK_EXECUTOR_MEMORY,
         "SPARK_SHUFFLE_PARTITIONS": SPARK_SHUFFLE_PARTITIONS,
+        "SPARK_DEFAULT_PARALLELISM": SPARK_DEFAULT_PARALLELISM,
+        "SPARK_SQL_FILES_MAX_PARTITION_BYTES": SPARK_SQL_FILES_MAX_PARTITION_BYTES,
+        "SPARK_ADVISORY_PARTITION_SIZE": SPARK_ADVISORY_PARTITION_SIZE,
+        "SPARK_DELTA_JARS": SPARK_DELTA_JARS,
+        "AFFECTED_WILAYAH_IDS": ",".join(sorted(_pipeline_running_affected_ids)),
+        "TRAIN_MODEL_REQUESTED": "true" if _pipeline_state.get("train_model_requested") else "false",
         "PYSPARK_PYTHON": "python3",
         "PYSPARK_DRIVER_PYTHON": "python3",
     })
 
     log.info(f"Running Spark job: {job_path}")
+    proc = None
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             ["python3", job_path],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=600,
             env=env,
         )
-        if result.returncode == 0:
+        _current_job_process = proc
+        started_at = time.time()
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                if _pipeline_cancel_requested:
+                    log.warning("Terminating Spark job %s after cancel request", job_file)
+                    proc.terminate()
+                    try:
+                        stdout, stderr = proc.communicate(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        stdout, stderr = proc.communicate()
+                    return False
+                if time.time() - started_at > 600:
+                    log.error("Job %s timed out after 600s", job_file)
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+                    return False
+
+        if proc.returncode == 0:
             log.info(f"Job {job_file} completed successfully")
-            if result.stdout:
-                log.info(f"Job stdout:\n{result.stdout[-1000:]}")
+            if stdout:
+                log.info(f"Job stdout:\n{stdout[-1000:]}")
             return True
         else:
-            log.error(f"Job {job_file} failed (exit {result.returncode}):\n{result.stderr[-2000:]}")
+            log.error(f"Job {job_file} failed (exit {proc.returncode}):\n{stderr[-2000:]}")
             return False
-    except subprocess.TimeoutExpired:
-        log.error(f"Job {job_file} timed out after 600s")
-        return False
     except Exception as e:
         log.error(f"Job {job_file} exception: {e}")
         return False
+    finally:
+        if _current_job_process is proc:
+            _current_job_process = None
 
 
-async def request_pipeline(reason: str, affected_ids: Optional[List[str]] = None) -> str:
+async def run_job_with_progress(
+    job_file: str,
+    phase: str,
+    label: str,
+    start_progress: int,
+    end_progress: int,
+    expected_seconds: int,
+) -> bool:
+    loop = asyncio.get_event_loop()
+    future = loop.run_in_executor(None, run_spark_job, job_file)
+    started_at = time.time()
+    await publish_pipeline_progress(phase, label, start_progress)
+    last_progress = round(float(start_progress), 1)
+
+    while not future.done():
+        if _pipeline_cancel_requested:
+            await asyncio.sleep(PROGRESS_TICK_SECONDS)
+            continue
+        elapsed = time.time() - started_at
+        fraction = min(0.96, elapsed / max(expected_seconds, 1))
+        progress = round(start_progress + (end_progress - start_progress) * fraction, 1)
+        if progress != last_progress:
+            last_progress = progress
+            await publish_pipeline_progress(phase, label, progress)
+        await asyncio.sleep(PROGRESS_TICK_SECONDS)
+
+    ok = await future
+    if ok:
+        await publish_pipeline_progress(phase, label, end_progress)
+    return ok
+
+
+async def request_pipeline(
+    reason: str,
+    affected_ids: Optional[List[str]] = None,
+    train_model: bool = False,
+) -> str:
     """Queue one debounced pipeline run and coalesce duplicate triggers."""
-    global _pipeline_pending, _pipeline_last_requested, _pipeline_task
+    global _pipeline_pending, _pipeline_last_requested, _pipeline_task, _pipeline_train_requested
 
     _pipeline_pending = True
     _pipeline_last_requested = time.time()
+    _pipeline_train_requested = _pipeline_train_requested or train_model
     for wid in affected_ids or []:
         if wid:
             _pipeline_affected_ids.add(str(wid))
@@ -464,7 +704,25 @@ async def request_pipeline(reason: str, affected_ids: Optional[List[str]] = None
     else:
         status = "queued"
 
-    set_pipeline_state("queued", affected_ids=sorted(_pipeline_affected_ids))
+    if status == "running":
+        _pipeline_state.update({
+            "last_event_at": datetime.utcnow().isoformat(),
+            "pending": True,
+            "pending_affected_ids": sorted(_pipeline_affected_ids),
+            "running_affected_ids": sorted(_pipeline_running_affected_ids),
+            "train_model_requested": _pipeline_train_requested,
+        })
+    else:
+        set_pipeline_state(
+            "queued",
+            phase="queued",
+            phase_label="Menunggu data siap diproses",
+            progress=8,
+            affected_ids=sorted(_pipeline_affected_ids),
+            pending_affected_ids=sorted(_pipeline_affected_ids),
+            running_affected_ids=[],
+            train_model_requested=_pipeline_train_requested,
+        )
     await broadcast_sse("processing_queued", {
         "reason": reason,
         "pipeline": pipeline_status_payload(),
@@ -500,40 +758,131 @@ async def pipeline_worker():
             _pipeline_task = asyncio.create_task(pipeline_worker())
 
 
+async def finish_pipeline_cancelled(affected_ids: List[str]):
+    global _pipeline_running_affected_ids
+    set_pipeline_state(
+        "cancelled",
+        phase="cancelled",
+        phase_label="Pemrosesan dibatalkan",
+        progress=100,
+        affected_ids=affected_ids,
+        pending_affected_ids=sorted(_pipeline_affected_ids),
+        running_affected_ids=[],
+        train_model_requested=False,
+        last_error="Pipeline cancelled by user",
+    )
+    _pipeline_running_affected_ids.clear()
+    await broadcast_sse("processing_cancelled", {
+        "affected_ids": affected_ids,
+        "pipeline": pipeline_status_payload(),
+    })
+    log.info("=== Pipeline cancelled ===")
+
+
 # ============================================================
 # BACKGROUND TASK: Full pipeline processing
 # ============================================================
 async def run_pipeline():
     """Run full processing pipeline: Bronze→Silver→Gold."""
-    global _pipeline_affected_ids
-    loop = asyncio.get_event_loop()
-    current_affected_ids = sorted(_pipeline_affected_ids)
-    set_pipeline_state("running", affected_ids=current_affected_ids)
+    global _pipeline_affected_ids, _pipeline_running_affected_ids, _pipeline_train_requested, _pipeline_cancel_requested
+    _pipeline_cancel_requested = False
+    _pipeline_running_affected_ids = set(_pipeline_affected_ids)
+    _pipeline_affected_ids.clear()
+    current_affected_ids = sorted(_pipeline_running_affected_ids)
+    train_model = _pipeline_train_requested or FORCE_TRAIN_EVERY_RUN
+    _pipeline_train_requested = False
+    set_pipeline_state(
+        "running",
+        phase="preparing",
+        phase_label="Menyiapkan data untuk diproses",
+        progress=15,
+        affected_ids=current_affected_ids,
+        pending_affected_ids=[],
+        running_affected_ids=current_affected_ids,
+        train_model_requested=train_model,
+    )
     await broadcast_sse("processing_started", {"pipeline": pipeline_status_payload()})
     log.info("=== Pipeline started ===")
 
-    await loop.run_in_executor(None, stop_api_spark)
+    await publish_pipeline_progress("preparing", "Menyiapkan data untuk diproses", 18)
+    stop_api_spark()
 
     # Job 1: Bronze → Silver
-    ok1 = await loop.run_in_executor(None, run_spark_job, "job1_bronze_silver.py")
+    ok1 = await run_job_with_progress(
+        "job1_bronze_silver.py",
+        "validating",
+        "Memeriksa dan merapikan data survei",
+        18,
+        48 if train_model else 58,
+        JOB1_EXPECTED_SECONDS,
+    )
     if ok1:
         log.info("Job 1 complete: Bronze → Silver")
     else:
         log.warning("Job 1 had issues, continuing...")
 
-    # Job 2: Train ML model (only if ground truth exists)
-    ok2 = await loop.run_in_executor(None, run_spark_job, "job2_train_model.py")
-    if ok2:
-        log.info("Job 2 complete: ML model trained")
-    else:
-        log.warning("Job 2 had issues (maybe no ground truth yet), continuing...")
+    if _pipeline_cancel_requested:
+        await finish_pipeline_cancelled(current_affected_ids)
+        return
+
+    ok2 = True
+    if train_model:
+        ok2 = await run_job_with_progress(
+            "job2_train_model.py",
+            "analyzing",
+            "Memperbarui analisis wilayah",
+            48,
+            70,
+            JOB2_EXPECTED_SECONDS,
+        )
+        if ok2:
+            log.info("Job 2 complete: ML model training step finished")
+        else:
+            log.warning("Job 2 had issues (maybe no ground truth yet), continuing to model-backed Gold step...")
+
+    if _pipeline_cancel_requested:
+        await finish_pipeline_cancelled(current_affected_ids)
+        return
 
     # Job 3: Silver → Gold
-    ok3 = await loop.run_in_executor(None, run_spark_job, "job3_silver_gold.py")
+    ok3 = await run_job_with_progress(
+        "job3_silver_gold.py",
+        "publishing",
+        "Menyiapkan hasil peta terbaru",
+        70 if train_model else 58,
+        96,
+        JOB3_EXPECTED_SECONDS,
+    )
     if ok3:
         log.info("Job 3 complete: Silver → Gold")
     else:
         log.warning("Job 3 had issues, continuing...")
+
+    if _pipeline_cancel_requested:
+        await finish_pipeline_cancelled(current_affected_ids)
+        return
+
+    if not ok3 and not train_model:
+        log.warning("Gold step failed without model refresh; training model once, then retrying Gold")
+        ok2 = await run_job_with_progress(
+            "job2_train_model.py",
+            "analyzing",
+            "Memperbarui analisis wilayah",
+            58,
+            76,
+            JOB2_EXPECTED_SECONDS,
+        )
+        if _pipeline_cancel_requested:
+            await finish_pipeline_cancelled(current_affected_ids)
+            return
+        ok3 = await run_job_with_progress(
+            "job3_silver_gold.py",
+            "publishing",
+            "Menyiapkan hasil peta terbaru",
+            76,
+            96,
+            JOB3_EXPECTED_SECONDS,
+        )
 
     jobs_ok = {
         "job1_bronze_silver": ok1,
@@ -543,12 +892,17 @@ async def run_pipeline():
     pipeline_success = bool(ok1 and ok3)
     set_pipeline_state(
         "succeeded" if pipeline_success else "failed",
+        phase="completed" if pipeline_success else "failed",
+        phase_label="Pembaruan selesai" if pipeline_success else "Pemrosesan belum berhasil",
+        progress=100,
         jobs_ok=jobs_ok,
         affected_ids=current_affected_ids,
+        pending_affected_ids=sorted(_pipeline_affected_ids),
+        running_affected_ids=[],
+        train_model_requested=False,
         last_error=None if pipeline_success else "One or more required Spark jobs failed",
     )
-    for wid in current_affected_ids:
-        _pipeline_affected_ids.discard(wid)
+    _pipeline_running_affected_ids.clear()
 
     invalidate_cache()
     payload = {
@@ -574,6 +928,39 @@ async def get_pipeline_status():
     return pipeline_status_payload()
 
 
+@app.post("/api/pipeline/cancel")
+async def cancel_pipeline():
+    """Cancel the active or queued pipeline work."""
+    global _pipeline_cancel_requested, _pipeline_pending
+    active = pipeline_status_payload()
+    if not (active.get("running") or active.get("pending")):
+        return {"status": "idle", "pipeline": active}
+
+    _pipeline_cancel_requested = True
+    _pipeline_pending = False
+    _pipeline_affected_ids.clear()
+
+    proc = _current_job_process
+    if not active.get("running"):
+        await finish_pipeline_cancelled(active.get("affected_ids") or [])
+        return {"status": "cancelled", "pipeline": pipeline_status_payload()}
+
+    if proc is not None and proc.poll() is None:
+        log.warning("Terminating active Spark job after user cancel")
+        proc.terminate()
+
+    set_pipeline_state(
+        "running",
+        phase="cancelling",
+        phase_label="Membatalkan pemrosesan",
+        progress=max(float(_pipeline_state.get("progress") or 0), 1.0),
+        pending_affected_ids=[],
+        running_affected_ids=sorted(_pipeline_running_affected_ids),
+    )
+    await broadcast_sse("processing_progress", {"pipeline": pipeline_status_payload()})
+    return {"status": "cancelling", "pipeline": pipeline_status_payload()}
+
+
 # ============================================================
 # ROUTES: Wilayah (Master)
 # ============================================================
@@ -588,7 +975,7 @@ async def get_wilayah(
     offset: int = Query(0, ge=0),
 ):
     """Return registered wilayah with optional filtering and pagination."""
-    path = f"{HDFS_URL}/data/bronze/master_wilayah"
+    path = lakehouse_path("bronze/master_wilayah")
     rows = read_delta(path)
     if rows is None:
         return {"wilayah": [], "total": 0, "limit": limit, "offset": offset, "has_more": False}
@@ -612,7 +999,7 @@ async def get_wilayah_options(
     rw: Optional[str] = None,
 ):
     """Return distinct option values for cascading wilayah selectors."""
-    path = f"{HDFS_URL}/data/bronze/master_wilayah"
+    path = lakehouse_path("bronze/master_wilayah")
     rows = read_delta(path) or []
     filtered = filter_wilayah_rows(rows, kecamatan=kecamatan, kelurahan=kelurahan, rw=rw)
     options = sorted({str(r.get(level, "")) for r in filtered if r.get(level) not in (None, "")})
@@ -627,7 +1014,7 @@ async def lookup_wilayah(
     rt: str,
 ):
     """Find one wilayah from cascading selector values."""
-    path = f"{HDFS_URL}/data/bronze/master_wilayah"
+    path = lakehouse_path("bronze/master_wilayah")
     rows = read_delta(path) or []
     filtered = filter_wilayah_rows(rows, kecamatan=kecamatan, kelurahan=kelurahan, rw=rw, rt=rt)
     if not filtered:
@@ -643,7 +1030,7 @@ async def create_wilayah(wilayah: WilayahCreate):
         spark = get_spark()
 
         # Check if already exists
-        path = f"{HDFS_URL}/data/bronze/master_wilayah"
+        path = lakehouse_path("bronze/master_wilayah")
         try:
             existing = spark.read.format("delta").load(path)
             count = existing.filter(existing.id_wilayah == wilayah.id_wilayah).count()
@@ -703,10 +1090,10 @@ async def create_wilayah(wilayah: WilayahCreate):
 @app.post("/api/survey", status_code=201)
 async def submit_survey(event: SurveyEvent):
     """Submit a survey event. The consumer triggers processing after Bronze write."""
-    event_id = str(uuid.uuid4())
+    event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"survey:{event.idempotency_key}")) if event.idempotency_key else str(uuid.uuid4())
     recorded_at = datetime.utcnow().isoformat()
 
-    payload = event.model_dump()
+    payload = event.model_dump(exclude={"idempotency_key"})
     payload["event_id"] = event_id
     payload["recorded_at"] = recorded_at
 
@@ -716,14 +1103,15 @@ async def submit_survey(event: SurveyEvent):
         "status": "accepted",
         "event_id": event_id,
         "recorded_at": recorded_at,
-        "message": "Data diterima, pipeline akan berjalan setelah data masuk Bronze..."
+        "message": "Data diterima. Pemrosesan akan berjalan setelah data siap."
     }
 
 
 @app.post("/api/secondary/upload", status_code=201)
 async def upload_secondary(
     file: UploadFile = File(...),
-    source_type: str = Form("ground_truth")
+    source_type: str = Form("ground_truth"),
+    idempotency_key: Optional[str] = Form(None),
 ):
     """Upload a secondary data CSV file (BPS, BMKG, PDAM, ground_truth)."""
     import csv
@@ -736,7 +1124,7 @@ async def upload_secondary(
     count = 0
     for row in reader:
         payload = dict(row)
-        payload["batch_id"] = str(uuid.uuid4())
+        payload["batch_id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"secondary:{idempotency_key}:{count}")) if idempotency_key else str(uuid.uuid4())
         payload["source_type"] = source_type
         payload["ingested_at"] = datetime.utcnow().isoformat()
         produce_kafka_message(TOPIC_SECONDARY, payload)
@@ -745,7 +1133,8 @@ async def upload_secondary(
     return {
         "status": "accepted",
         "rows_ingested": count,
-        "source_type": source_type
+        "source_type": source_type,
+        "accepted_at": datetime.utcnow().isoformat(),
     }
 
 
@@ -762,8 +1151,8 @@ async def get_map_risk_score(
     offset: int = Query(0, ge=0),
 ):
     """Return paged GeoJSON FeatureCollection with risk scores per wilayah."""
-    gold_path = f"{HDFS_URL}/data/gold/slum_risk_score"
-    wilayah_path = f"{HDFS_URL}/data/bronze/master_wilayah"
+    gold_path = lakehouse_path("gold/slum_risk_score")
+    wilayah_path = lakehouse_path("bronze/master_wilayah")
 
     gold_rows = read_delta(gold_path)
     wilayah_rows = read_delta(wilayah_path)
@@ -859,9 +1248,23 @@ async def get_map_risk_score(
 
 
 @app.get("/api/map/prediction")
-async def get_map_prediction():
-    """Return GeoJSON with prediction labels."""
-    return await get_map_risk_score()  # same data, frontend filters what to show
+async def get_map_prediction(
+    bbox: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    ids: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Return paged GeoJSON with prediction labels."""
+    return await get_map_risk_score(
+        bbox=bbox,
+        lat=lat,
+        lng=lng,
+        ids=ids,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # ============================================================
@@ -870,7 +1273,7 @@ async def get_map_prediction():
 @app.get("/api/wilayah/{id_wilayah}/latest")
 async def get_wilayah_latest(id_wilayah: str):
     """Get the latest survey indicators for a wilayah."""
-    path = f"{HDFS_URL}/data/silver/latest_indicators"
+    path = lakehouse_path("silver/latest_indicators")
     rows = read_delta(path)
     if rows is None:
         raise HTTPException(status_code=404, detail="No data available yet")
@@ -883,11 +1286,11 @@ async def get_wilayah_latest(id_wilayah: str):
 @app.get("/api/wilayah/{id_wilayah}/history")
 async def get_wilayah_history(id_wilayah: str):
     """Get ALL historical events for a wilayah — incremental log."""
-    path = f"{HDFS_URL}/data/silver/event_history"
+    path = lakehouse_path("silver/event_history")
     rows = read_delta(path)
     if rows is None:
         # Try bronze directly
-        path = f"{HDFS_URL}/data/bronze/survey_events"
+        path = lakehouse_path("bronze/survey_events")
         rows = read_delta(path)
 
     if rows is None:
@@ -908,7 +1311,7 @@ async def get_wilayah_history(id_wilayah: str):
 @app.get("/api/wilayah/{id_wilayah}/trend")
 async def get_wilayah_trend(id_wilayah: str):
     """Get risk score trend over time for a wilayah."""
-    path = f"{HDFS_URL}/data/gold/slum_trend"
+    path = lakehouse_path("gold/slum_trend")
     rows = read_delta(path)
     if rows is None:
         return {"id_wilayah": id_wilayah, "trend": []}
@@ -919,7 +1322,7 @@ async def get_wilayah_trend(id_wilayah: str):
 @app.get("/api/kelurahan/{id_kelurahan}/factors")
 async def get_kelurahan_factors(id_kelurahan: str):
     """Get top-3 dominant factors for a kelurahan."""
-    path = f"{HDFS_URL}/data/gold/dominant_factors"
+    path = lakehouse_path("gold/dominant_factors")
     rows = read_delta(path)
     if rows is None:
         raise HTTPException(status_code=404, detail="No factor data available yet")
@@ -932,7 +1335,7 @@ async def get_kelurahan_factors(id_kelurahan: str):
 @app.get("/api/priority")
 async def get_priority():
     """Get intervention priority ranking."""
-    path = f"{HDFS_URL}/data/gold/intervention_priority"
+    path = lakehouse_path("gold/intervention_priority")
     rows = read_delta(path)
     if rows is None:
         return {"priority": [], "total": 0}
@@ -943,9 +1346,9 @@ async def get_priority():
 @app.get("/api/summary")
 async def get_summary():
     """Dashboard summary statistics."""
-    gold_path = f"{HDFS_URL}/data/gold/slum_risk_score"
-    wilayah_path = f"{HDFS_URL}/data/bronze/master_wilayah"
-    bronze_path = f"{HDFS_URL}/data/bronze/survey_events"
+    gold_path = lakehouse_path("gold/slum_risk_score")
+    wilayah_path = lakehouse_path("bronze/master_wilayah")
+    bronze_path = lakehouse_path("bronze/survey_events")
 
     gold_rows = read_delta(gold_path) or []
     wilayah_rows = read_delta(wilayah_path) or []
@@ -1015,7 +1418,8 @@ async def stream_updates():
 async def trigger_processing(payload: Optional[PipelineTrigger] = Body(None)):
     """Called by Kafka consumer after writing to Bronze. Debounces Spark pipeline."""
     affected_ids = payload.affected_ids if payload else []
-    status = await request_pipeline("consumer", affected_ids)
+    train_model = bool(payload.train_model) if payload else False
+    status = await request_pipeline("consumer", affected_ids, train_model=train_model)
     return {
         "status": status,
         "debounce_seconds": PIPELINE_DEBOUNCE_SECONDS,

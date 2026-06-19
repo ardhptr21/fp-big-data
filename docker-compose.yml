@@ -114,7 +114,7 @@ services:
     user: root
     command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark:7077"]
     environment:
-      SPARK_WORKER_MEMORY: "1g"
+      SPARK_WORKER_MEMORY: "768m"
       SPARK_WORKER_CORES: "1"
       SPARK_WORKER_WEBUI_PORT: "8081"
     volumes:
@@ -138,19 +138,25 @@ services:
       - KAFKA_TOPIC_SURVEY=survey-events
       - KAFKA_TOPIC_SECONDARY=secondary-batch
       - HDFS_URL=hdfs://namenode:9000
+      - STORAGE_MODE=auto
+      - LOCAL_LAKEHOUSE_DIR=/data/local_lakehouse
       - API_URL=http://api:8000
       - SPARK_MASTER=local[1]
       - SPARK_LOCAL_THREADS=1
-      - SPARK_DRIVER_MEMORY=768m
-      - SPARK_EXECUTOR_MEMORY=768m
-      - SPARK_SHUFFLE_PARTITIONS=4
+      - SPARK_DRIVER_MEMORY=512m
+      - SPARK_EXECUTOR_MEMORY=512m
+      - SPARK_SHUFFLE_PARTITIONS=2
+      - SPARK_DEFAULT_PARALLELISM=1
+      - SPARK_SQL_FILES_MAX_PARTITION_BYTES=32m
+      - SPARK_ADVISORY_PARTITION_SIZE=16m
     volumes:
       - ./spark_jobs:/opt/spark_jobs
+      - local_lakehouse:/data/local_lakehouse
     depends_on:
       kafka:
         condition: service_healthy
       namenode:
-        condition: service_healthy
+        condition: service_started
     restart: on-failure
     networks:
       - slum_net
@@ -167,24 +173,37 @@ services:
       - "8000:8000"
     environment:
       - HDFS_URL=hdfs://namenode:9000
+      - STORAGE_MODE=auto
+      - LOCAL_LAKEHOUSE_DIR=/data/local_lakehouse
       - KAFKA_BOOTSTRAP=kafka:9092
       - KAFKA_TOPIC_SURVEY=survey-events
       - KAFKA_TOPIC_SECONDARY=secondary-batch
       - SPARK_MASTER=local[1]
       - SPARK_JOBS_PATH=/opt/spark_jobs
       - SPARK_LOCAL_THREADS=1
-      - SPARK_DRIVER_MEMORY=768m
-      - SPARK_EXECUTOR_MEMORY=768m
-      - SPARK_SHUFFLE_PARTITIONS=4
-      - PIPELINE_DEBOUNCE_SECONDS=15
+      - SPARK_DRIVER_MEMORY=512m
+      - SPARK_EXECUTOR_MEMORY=512m
+      - SPARK_SHUFFLE_PARTITIONS=2
+      - SPARK_DEFAULT_PARALLELISM=1
+      - SPARK_SQL_FILES_MAX_PARTITION_BYTES=32m
+      - SPARK_ADVISORY_PARTITION_SIZE=16m
+      - PIPELINE_DEBOUNCE_SECONDS=2
+      - FORCE_TRAIN_EVERY_RUN=false
+      - RF_NUM_TREES=8
+      - RF_MAX_DEPTH=3
+      - JOB1_EXPECTED_SECONDS=35
+      - JOB2_EXPECTED_SECONDS=55
+      - JOB3_EXPECTED_SECONDS=45
+      - PROGRESS_TICK_SECONDS=0.75
     volumes:
       - ./spark_jobs:/opt/spark_jobs
       - ./init_scripts:/init_scripts
+      - local_lakehouse:/data/local_lakehouse
     depends_on:
       kafka:
         condition: service_healthy
       namenode:
-        condition: service_healthy
+        condition: service_started
     restart: on-failure
     networks:
       - slum_net
@@ -230,6 +249,7 @@ volumes:
   hadoop_datanode:
   kafka_data:
   spark_data:
+  local_lakehouse:
 
 networks:
   slum_net:

@@ -3,8 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Input Data Survei — SlumMap Surabaya</title>
+  <title>Isi Data Survei | SlumMap Surabaya</title>
   <meta name="description" content="Form input data survei 7 indikator kekumuhan PUPR untuk wilayah RT/RW di Kota Surabaya.">
+  <script src="/js/theme.js"></script>
+  <script src="/js/pipeline-status.js"></script>
+  <script src="/js/api-cache.js"></script>
   <link rel="stylesheet" href="/css/style.css">
   <style>
     .form-page {
@@ -28,7 +31,7 @@
     .score-preview-box {
       background: var(--bg-primary);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 1rem;
       display: flex;
       align-items: center;
@@ -52,14 +55,14 @@
 <!-- Navigation -->
 <nav class="nav">
   <a href="/" class="nav-brand">
-    <div class="nav-brand-icon">🗺️</div>
+    <div class="nav-brand-icon">GIS</div>
     <span>SlumMap Surabaya</span>
   </a>
   <ul class="nav-links">
-    <li><a href="/">🗺️ Peta Utama</a></li>
-    <li><a href="/input.html" class="active">📝 Input Data</a></li>
-    <li><a href="/prioritas.html">🚨 Prioritas</a></li>
-    <li><a href="/register.html">➕ Wilayah Baru</a></li>
+    <li><a href="/">Peta Utama</a></li>
+    <li><a href="/input.html" class="active">Isi Survei</a></li>
+    <li><a href="/prioritas.html">Prioritas</a></li>
+    <li><a href="/register.html">Wilayah Baru</a></li>
   </ul>
 </nav>
 
@@ -68,9 +71,9 @@
 
     <!-- Header -->
     <div class="page-header">
-      <h1 class="page-title">📝 Input Data Survei</h1>
+      <h1 class="page-title">Isi Data Survei</h1>
       <p class="page-subtitle">
-        Setiap pengisian menghasilkan <strong>event baru</strong> — data lama tidak pernah ditimpa (log-based).
+        Catat kondisi terbaru wilayah berdasarkan 7 indikator kekumuhan PUPR.
       </p>
     </div>
 
@@ -86,25 +89,25 @@
             <div class="form-group">
               <label class="form-label" for="sel-kecamatan">Kecamatan <span>*</span></label>
               <select class="form-control" id="sel-kecamatan">
-                <option value="">— Loading... —</option>
+                <option value="">Memuat...</option>
               </select>
             </div>
             <div class="form-group">
               <label class="form-label" for="sel-kelurahan">Kelurahan <span>*</span></label>
               <select class="form-control" id="sel-kelurahan">
-                <option value="">— Pilih Kecamatan dulu —</option>
+                <option value="">Pilih Kecamatan dulu</option>
               </select>
             </div>
             <div class="form-group">
               <label class="form-label" for="sel-rw">RW <span>*</span></label>
               <select class="form-control" id="sel-rw">
-                <option value="">— Pilih Kelurahan dulu —</option>
+                <option value="">Pilih Kelurahan dulu</option>
               </select>
             </div>
             <div class="form-group">
               <label class="form-label" for="sel-rt">RT <span>*</span></label>
               <select class="form-control" id="sel-rt">
-                <option value="">— Pilih RW dulu —</option>
+                <option value="">Pilih RW dulu</option>
               </select>
             </div>
           </div>
@@ -112,7 +115,7 @@
           <input type="hidden" id="selected-wilayah-id">
 
           <div id="wilayah-preview" style="margin-top:1rem;padding:0.75rem;background:var(--bg-primary);border-radius:8px;font-size:0.8125rem;color:var(--text-secondary);">
-            Pilih kecamatan → kelurahan → RW → RT di atas
+            Pilih kecamatan, kelurahan, RW, lalu RT di atas
           </div>
         </div>
       </div>
@@ -121,14 +124,14 @@
       <div class="card" style="margin-bottom:1.5rem;">
         <div class="card-header">
           <span class="card-title">2. 7 Indikator Kekumuhan PUPR</span>
-          <span style="font-size:0.75rem;color:var(--text-muted);">0=Baik → 3=Sangat Buruk</span>
+          <span style="font-size:0.75rem;color:var(--text-muted);">0=Baik sampai 3=Sangat Buruk</span>
         </div>
         <div class="card-body">
           <div class="indicator-grid" id="indicator-grid">
 
             <!-- Indikator 1: Bangunan -->
             <div class="indicator-group">
-              <div class="indicator-label">🏚️ Kondisi Bangunan</div>
+              <div class="indicator-label">Kondisi Bangunan</div>
               <div class="radio-options">
                 <input type="radio" name="skor_bangunan" id="bang0" value="0" class="radio-option opt-0">
                 <label for="bang0" class="radio-label opt-0-lbl" title="Baik">0</label>
@@ -144,7 +147,7 @@
 
             <!-- Indikator 2: Jalan -->
             <div class="indicator-group">
-              <div class="indicator-label">🛣️ Aksesibilitas Jalan</div>
+              <div class="indicator-label">Aksesibilitas Jalan</div>
               <div class="radio-options">
                 <input type="radio" name="skor_jalan" id="jln0" value="0" class="radio-option opt-0">
                 <label for="jln0" class="radio-label opt-0-lbl">0</label>
@@ -159,7 +162,7 @@
 
             <!-- Indikator 3: Drainase -->
             <div class="indicator-group">
-              <div class="indicator-label">💧 Drainase Lingkungan</div>
+              <div class="indicator-label">Drainase Lingkungan</div>
               <div class="radio-options">
                 <input type="radio" name="skor_drainase" id="dra0" value="0" class="radio-option opt-0">
                 <label for="dra0" class="radio-label opt-0-lbl">0</label>
@@ -174,7 +177,7 @@
 
             <!-- Indikator 4: Air Limbah -->
             <div class="indicator-group">
-              <div class="indicator-label">🚽 Pengelolaan Air Limbah</div>
+              <div class="indicator-label">Pengelolaan Air Limbah</div>
               <div class="radio-options">
                 <input type="radio" name="skor_air_limbah" id="alm0" value="0" class="radio-option opt-0">
                 <label for="alm0" class="radio-label opt-0-lbl">0</label>
@@ -189,7 +192,7 @@
 
             <!-- Indikator 5: Sampah -->
             <div class="indicator-group">
-              <div class="indicator-label">🗑️ Pengelolaan Persampahan</div>
+              <div class="indicator-label">Pengelolaan Persampahan</div>
               <div class="radio-options">
                 <input type="radio" name="skor_sampah" id="smp0" value="0" class="radio-option opt-0">
                 <label for="smp0" class="radio-label opt-0-lbl">0</label>
@@ -204,7 +207,7 @@
 
             <!-- Indikator 6: Kebakaran -->
             <div class="indicator-group">
-              <div class="indicator-label">🔥 Proteksi Kebakaran</div>
+              <div class="indicator-label">Proteksi Kebakaran</div>
               <div class="radio-options">
                 <input type="radio" name="skor_kebakaran" id="kb0" value="0" class="radio-option opt-0">
                 <label for="kb0" class="radio-label opt-0-lbl">0</label>
@@ -219,7 +222,7 @@
 
             <!-- Indikator 7: Air Minum -->
             <div class="indicator-group">
-              <div class="indicator-label">🚰 Penyediaan Air Minum</div>
+              <div class="indicator-label">Penyediaan Air Minum</div>
               <div class="radio-options">
                 <input type="radio" name="skor_air_minum" id="am0" value="0" class="radio-option opt-0">
                 <label for="am0" class="radio-label opt-0-lbl">0</label>
@@ -233,11 +236,11 @@
             </div>
           </div>
 
-          <!-- Live Score Preview -->
+          <!-- Pratinjau Skor Langsung -->
           <div style="margin-top:1.25rem;">
-            <div class="form-label">Preview Estimasi Skor</div>
+            <div class="form-label">Pratinjau Estimasi Skor</div>
             <div class="score-preview-box">
-              <span id="score-preview" style="font-size:0.875rem;color:var(--text-muted);">Isi semua indikator untuk melihat preview skor</span>
+              <span id="score-preview" style="font-size:0.875rem;color:var(--text-muted);">Isi semua indikator untuk melihat pratinjau skor</span>
             </div>
           </div>
         </div>
@@ -293,42 +296,39 @@
       <!-- Submit -->
       <div style="display:flex;gap:1rem;align-items:center;">
         <button type="submit" class="btn btn-primary" id="submit-btn" style="padding:0.75rem 2rem;font-size:0.9375rem;">
-          🚀 Submit Data Survei
+          Kirim Data Survei
         </button>
-        <button type="reset" class="btn btn-secondary">↩️ Reset</button>
+        <button type="reset" class="btn btn-secondary">Atur Ulang</button>
         <span style="font-size:0.8125rem;color:var(--text-muted);">
-          Data akan diproses melalui pipeline Big Data dan peta akan diperbarui otomatis.
+          Peta akan diperbarui setelah data selesai diproses.
         </span>
       </div>
 
-      <!-- Success banner -->
-      <div id="success-banner" style="display:none;"></div>
-
     </form>
 
-    <!-- Upload Secondary Data -->
+    <!-- Unggah Data Sekunder -->
     <hr class="section-divider">
     <div class="card">
       <div class="card-header">
-        <span class="card-title">📁 Upload Data Sekunder</span>
-        <span style="font-size:0.75rem;color:var(--text-muted);">BPS / BMKG / PDAM / Ground Truth</span>
+        <span class="card-title">Unggah Data Sekunder</span>
+        <span style="font-size:0.75rem;color:var(--text-muted);">BPS / BMKG / PDAM / Label Validasi</span>
       </div>
       <div class="card-body">
         <form id="upload-form" style="display:flex;gap:1rem;align-items:flex-end;flex-wrap:wrap;">
           <div class="form-group" style="flex:1;min-width:200px;">
             <label class="form-label" for="upload-type">Tipe Data</label>
             <select class="form-control" id="upload-type">
-              <option value="ground_truth">Ground Truth (label kumuh)</option>
+              <option value="ground_truth">Label Validasi Kumuh</option>
               <option value="bps">BPS (kepadatan penduduk)</option>
               <option value="bmkg">BMKG/BPBD (banjir)</option>
               <option value="pdam">PDAM (akses air)</option>
             </select>
           </div>
           <div class="form-group" style="flex:2;min-width:200px;">
-            <label class="form-label" for="upload-file">File CSV</label>
+            <label class="form-label" for="upload-file">Berkas CSV</label>
             <input type="file" class="form-control" id="upload-file" accept=".csv">
           </div>
-          <button type="submit" class="btn btn-secondary" id="upload-btn">📤 Upload</button>
+          <button type="submit" class="btn btn-secondary" id="upload-btn">Unggah</button>
         </form>
         <div id="upload-result" style="margin-top:1rem;"></div>
       </div>
@@ -349,27 +349,42 @@ document.getElementById('upload-form').addEventListener('submit', async (e) => {
 
   const btn = document.getElementById('upload-btn');
   btn.disabled = true;
-  btn.innerHTML = '<div class="spinner"></div> Uploading...';
+  btn.innerHTML = '<div class="spinner"></div> Mengunggah...';
 
   const formData = new FormData();
   formData.append('file', file);
   formData.append('source_type', document.getElementById('upload-type').value);
+  formData.append('idempotency_key', window.pipelineStatus?.createIdempotencyKey('secondary') || `secondary-${Date.now()}`);
+
+  window.pipelineStatus?.beginSubmission({
+    title: 'Mengunggah data',
+    message: 'Mengirim file ke server...',
+    affectedIds: [],
+    redirectTo: '/',
+    progress: 6,
+  });
 
   try {
     const res = await fetch('/api/secondary/upload', { method: 'POST', body: formData });
     const data = await res.json();
     if (res.ok) {
-      showToast('success', 'Upload berhasil', `${data.rows_ingested} baris diingest`);
       document.getElementById('upload-result').innerHTML =
-        `<div style="color:var(--risk-ringan);font-size:0.875rem;">✓ ${data.rows_ingested} baris berhasil diupload dan diproses.</div>`;
+        `<div style="color:var(--text-secondary);font-size:0.875rem;">${data.rows_ingested} baris diterima. Menunggu pembaruan hasil.</div>`;
+      window.pipelineStatus?.awaitCompletion({
+        title: 'Memproses data',
+        affectedIds: [],
+        redirectTo: '/',
+        submittedAt: data.accepted_at,
+      });
     } else {
-      throw new Error(data.detail || 'Upload failed');
+      throw new Error(data.detail || 'Unggah gagal');
     }
   } catch (err) {
-    showToast('error', 'Upload gagal', err.message);
+    showToast('error', 'Unggah gagal', err.message);
+    window.pipelineStatus?.failSubmission(err.message);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '📤 Upload';
+    btn.innerHTML = 'Unggah';
   }
 });
 </script>

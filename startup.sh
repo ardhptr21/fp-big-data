@@ -32,11 +32,20 @@ echo "[3/5] Starting infrastructure (HDFS, Kafka)..."
 $COMPOSE up -d namenode datanode kafka
 
 echo "   Waiting for HDFS NameNode..."
-until curl -sf http://localhost:9870 > /dev/null 2>&1; do
+HDFS_READY=false
+for _ in {1..24}; do
+  if curl -sf http://localhost:9870 > /dev/null 2>&1; then
+    HDFS_READY=true
+    break
+  fi
   printf "."
   sleep 5
 done
-echo " Ready!"
+if [ "$HDFS_READY" = "true" ]; then
+  echo " Ready!"
+else
+  echo " Not reachable; API and consumer will use local lakehouse fallback."
+fi
 
 echo "   Waiting for Kafka..."
 sleep 15
@@ -44,8 +53,15 @@ sleep 15
 # Initialize HDFS directories
 echo ""
 echo "[4/5] Initializing HDFS directory structure..."
-$COMPOSE up hdfs-init
-echo "   HDFS initialized!"
+if [ "$HDFS_READY" = "true" ]; then
+  if $COMPOSE up hdfs-init; then
+    echo "   HDFS initialized!"
+  else
+    echo "   HDFS init failed; continuing with local fallback available."
+  fi
+else
+  echo "   Skipping HDFS init because NameNode is not reachable."
+fi
 
 # Start application services
 echo ""

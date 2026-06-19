@@ -1,37 +1,42 @@
 /**
- * input.js — Survey form logic
+ * input.js - Survey form logic
  */
 
 const API_BASE = '/api';
-const optionCache = new Map();
+let wilayahList = [];
+
+function getJSON(url, options = {}) {
+  if (window.apiCache?.getJSON) return window.apiCache.getJSON(url, options);
+  return fetch(url).then(res => {
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    return res.json();
+  });
+}
 
 // ============================================================
 // LOAD WILAYAH
 // ============================================================
 async function loadWilayah() {
   try {
-    const kecs = await fetchWilayahOptions('kecamatan');
-    setSelectOptions(document.getElementById('sel-kecamatan'), '— Pilih Kecamatan —', kecs);
+    const applyWilayah = data => {
+      wilayahList = data.wilayah || [];
+      const kecs = uniqueSorted(wilayahList.map(w => w.kecamatan));
+      setSelectOptions(document.getElementById('sel-kecamatan'), 'Pilih Kecamatan', kecs);
+    };
+    const data = await getJSON(`${API_BASE}/wilayah?limit=5000`, {
+      ttl: 5 * 60 * 1000,
+      staleTtl: 24 * 60 * 60 * 1000,
+      onUpdate: applyWilayah,
+    });
+    applyWilayah(data);
   } catch (e) {
     console.error('Failed to load wilayah:', e);
-    showToast('error', 'Gagal memuat daftar wilayah', e.message);
+    if (wilayahList.length === 0) showToast('error', 'Gagal memuat daftar wilayah', e.message);
   }
 }
 
-async function fetchWilayahOptions(level, filters = {}) {
-  const params = new URLSearchParams({ level });
-  Object.entries(filters).forEach(([key, value]) => {
-    if (value) params.set(key, value);
-  });
-  const cacheKey = params.toString();
-  if (optionCache.has(cacheKey)) return optionCache.get(cacheKey);
-
-  const res = await fetch(`${API_BASE}/wilayah/options?${cacheKey}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const data = await res.json();
-  const options = data.options || [];
-  optionCache.set(cacheKey, options);
-  return options;
+function uniqueSorted(values) {
+  return [...new Set(values.filter(Boolean).map(String))].sort();
 }
 
 function setSelectOptions(select, placeholder, options, labelFn = v => v) {
@@ -52,16 +57,16 @@ function setSelectLoading(select, label = 'Memuat...') {
 function resetWilayahSelection(from = 'kecamatan') {
   const levels = {
     kecamatan: [
-      ['sel-kelurahan', '— Pilih Kecamatan dulu —'],
-      ['sel-rw', '— Pilih Kelurahan dulu —'],
-      ['sel-rt', '— Pilih RW dulu —'],
+      ['sel-kelurahan', 'Pilih Kecamatan dulu'],
+      ['sel-rw', 'Pilih Kelurahan dulu'],
+      ['sel-rt', 'Pilih RW dulu'],
     ],
     kelurahan: [
-      ['sel-rw', '— Pilih Kelurahan dulu —'],
-      ['sel-rt', '— Pilih RW dulu —'],
+      ['sel-rw', 'Pilih Kelurahan dulu'],
+      ['sel-rt', 'Pilih RW dulu'],
     ],
     rw: [
-      ['sel-rt', '— Pilih RW dulu —'],
+      ['sel-rt', 'Pilih RW dulu'],
     ],
   };
   (levels[from] || []).forEach(([id, placeholder]) => {
@@ -69,7 +74,7 @@ function resetWilayahSelection(from = 'kecamatan') {
   });
   document.getElementById('selected-wilayah-id').value = '';
   const preview = document.getElementById('wilayah-preview');
-  if (preview) preview.textContent = 'Pilih kecamatan → kelurahan → RW → RT di atas';
+  if (preview) preview.textContent = 'Pilih kecamatan, kelurahan, RW, lalu RT di atas';
 }
 
 async function onKecamatanChange() {
@@ -79,11 +84,11 @@ async function onKecamatanChange() {
   if (!kec) return;
   setSelectLoading(sel);
   try {
-    const kels = await fetchWilayahOptions('kelurahan', { kecamatan: kec });
-    setSelectOptions(sel, '— Pilih Kelurahan —', kels);
+    const kels = uniqueSorted(wilayahList.filter(w => w.kecamatan === kec).map(w => w.kelurahan));
+    setSelectOptions(sel, 'Pilih Kelurahan', kels);
   } catch (e) {
     showToast('error', 'Gagal mengambil data kelurahan', e.message);
-    setSelectOptions(sel, '— Pilih Kelurahan —', []);
+    setSelectOptions(sel, 'Pilih Kelurahan', []);
   }
 }
 
@@ -95,11 +100,11 @@ async function onKelurahanChange() {
   if (!kec || !kel) return;
   setSelectLoading(sel);
   try {
-    const rws = await fetchWilayahOptions('rw', { kecamatan: kec, kelurahan: kel });
-    setSelectOptions(sel, '— Pilih RW —', rws, r => `RW ${r}`);
+    const rws = uniqueSorted(wilayahList.filter(w => w.kecamatan === kec && w.kelurahan === kel).map(w => w.rw));
+    setSelectOptions(sel, 'Pilih RW', rws, r => `RW ${r}`);
   } catch (e) {
     showToast('error', 'Gagal mengambil data RW', e.message);
-    setSelectOptions(sel, '— Pilih RW —', []);
+    setSelectOptions(sel, 'Pilih RW', []);
   }
 }
 
@@ -112,11 +117,11 @@ async function onRwChange() {
   if (!kec || !kel || !rw) return;
   setSelectLoading(sel);
   try {
-    const rts = await fetchWilayahOptions('rt', { kecamatan: kec, kelurahan: kel, rw });
-    setSelectOptions(sel, '— Pilih RT —', rts, r => `RT ${r}`);
+    const rts = uniqueSorted(wilayahList.filter(w => w.kecamatan === kec && w.kelurahan === kel && String(w.rw) === String(rw)).map(w => w.rt));
+    setSelectOptions(sel, 'Pilih RT', rts, r => `RT ${r}`);
   } catch (e) {
     showToast('error', 'Gagal mengambil data RT', e.message);
-    setSelectOptions(sel, '— Pilih RT —', []);
+    setSelectOptions(sel, 'Pilih RT', []);
   }
 }
 
@@ -128,14 +133,17 @@ async function onRtChange() {
   document.getElementById('selected-wilayah-id').value = '';
   if (!kec || !kel || !rw || !rt) return;
 
-  const params = new URLSearchParams({ kecamatan: kec, kelurahan: kel, rw, rt });
   try {
-    const res = await fetch(`${API_BASE}/wilayah/lookup?${params.toString()}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const found = await res.json();
+    const found = wilayahList.find(w =>
+      w.kecamatan === kec &&
+      w.kelurahan === kel &&
+      String(w.rw) === String(rw) &&
+      String(w.rt) === String(rt)
+    );
+    if (!found) throw new Error('Wilayah tidak ditemukan');
     document.getElementById('selected-wilayah-id').value = found.id_wilayah;
     document.getElementById('wilayah-preview').innerHTML =
-      `<span style="color:var(--accent-teal);">✓ ${found.id_wilayah}</span> &nbsp; RT ${rt} / RW ${rw} &nbsp;·&nbsp; ${kel} &nbsp;·&nbsp; ${kec}`;
+      `<span style="color:var(--accent-teal);font-weight:700;">${found.id_wilayah}</span> &nbsp; RT ${rt} / RW ${rw} - ${kel} - ${kec}`;
   } catch (e) {
     showToast('error', 'Gagal mengambil data wilayah', e.message);
   }
@@ -189,7 +197,7 @@ async function submitSurvey(e) {
 
   const id_wilayah = document.getElementById('selected-wilayah-id').value;
   if (!id_wilayah) {
-    showToast('warning', 'Pilih wilayah', 'Silakan pilih Kecamatan → Kelurahan → RW → RT terlebih dahulu.');
+    showToast('warning', 'Pilih wilayah', 'Silakan pilih Kecamatan, Kelurahan, RW, lalu RT terlebih dahulu.');
     return;
   }
 
@@ -216,6 +224,7 @@ async function submitSurvey(e) {
 
   const payload = {
     id_wilayah,
+    idempotency_key: window.pipelineStatus?.createIdempotencyKey('survey') || `survey-${Date.now()}`,
     ...indicators,
     jumlah_kk: parseInt(document.getElementById('jumlah_kk')?.value || 0),
     jumlah_jiwa: parseInt(document.getElementById('jumlah_jiwa')?.value || 0),
@@ -231,6 +240,13 @@ async function submitSurvey(e) {
     btn.disabled = true;
     btn.innerHTML = '<div class="spinner"></div> Mengirim...';
   }
+  window.pipelineStatus?.beginSubmission({
+    title: 'Mengirim survei',
+    message: 'Mengirim data survei ke server...',
+    affectedIds: [id_wilayah],
+    redirectTo: '/',
+    progress: 6,
+  });
 
   try {
     const res = await fetch(`${API_BASE}/survey`, {
@@ -241,38 +257,24 @@ async function submitSurvey(e) {
 
     if (!res.ok) {
       const err = await res.json();
-      throw new Error(err.detail || 'Submit failed');
+      throw new Error(err.detail || 'Kirim gagal');
     }
 
     const data = await res.json();
-    showToast('success', 'Data diterima!',
-      `Event ID: ${data.event_id?.slice(0, 8)}... — Pipeline akan berjalan otomatis setelah data masuk Bronze.`);
-
-    // Show success banner
-    const banner = document.getElementById('success-banner');
-    if (banner) {
-      banner.innerHTML = `
-        <div style="background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);border-radius:10px;padding:1rem 1.25rem;margin-top:1.5rem;display:flex;align-items:center;gap:0.75rem;">
-          <span style="font-size:1.5rem;">✅</span>
-          <div>
-            <div style="font-weight:600;color:var(--text-primary);">Data berhasil dikirim!</div>
-            <div style="font-size:0.8125rem;color:var(--text-secondary);">
-              Event ID: <code style="font-family:monospace;color:var(--accent-teal);">${data.event_id}</code><br>
-              Pipeline Spark akan berjalan otomatis dan peta diperbarui setelah proses selesai.
-            </div>
-          </div>
-          <a href="/" class="btn btn-sm btn-secondary" style="margin-left:auto;">🗺️ Lihat Peta</a>
-        </div>
-      `;
-      banner.style.display = 'block';
-    }
+    window.pipelineStatus?.awaitCompletion({
+      title: 'Memproses survei',
+      affectedIds: [id_wilayah],
+      redirectTo: '/',
+      submittedAt: data.recorded_at,
+    });
 
   } catch (err) {
     showToast('error', 'Gagal mengirim data', err.message);
+    window.pipelineStatus?.failSubmission(err.message);
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.innerHTML = '🚀 Submit Data Survei';
+      btn.innerHTML = 'Kirim Data Survei';
     }
   }
 }
@@ -284,11 +286,11 @@ if (!window.showToast) {
   window.showToast = function(type, title, msg, duration = 4000) {
     const container = document.getElementById('toast-container');
     if (!container) return;
-    const icons = { success: '✅', error: '❌', info: 'ℹ️', warning: '⚠️' };
+    const icons = { success: 'SUKSES', error: 'GAGAL', info: 'INFO', warning: 'PERLU CEK' };
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
     toast.innerHTML = `
-      <span class="toast-icon">${icons[type] || 'ℹ️'}</span>
+      <span class="toast-icon">${icons[type] || 'INFO'}</span>
       <div class="toast-content">
         <div class="toast-title">${title}</div>
         ${msg ? `<div class="toast-msg">${msg}</div>` : ''}
@@ -315,7 +317,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('sel-rt')?.addEventListener('change', onRtChange);
   document.getElementById('survey-form')?.addEventListener('submit', submitSurvey);
 
-  // Live score preview
+  // Pratinjau skor langsung
   document.querySelectorAll('input[type="radio"]').forEach(r => {
     r.addEventListener('change', computePreviewScore);
   });

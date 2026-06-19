@@ -8,7 +8,9 @@ Uses Spark MLlib RandomForestClassifier.
 Only re-trains if ground truth data is available.
 """
 
+import glob
 import os
+import time
 from datetime import datetime
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -17,9 +19,10 @@ from pyspark.ml.feature import VectorAssembler, StringIndexer
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
-from delta import configure_spark_with_delta_pip
 
 HDFS_URL = os.environ.get("HDFS_URL", "hdfs://namenode:9000")
+STORAGE_MODE = os.environ.get("STORAGE_MODE", "auto").lower()
+LOCAL_LAKEHOUSE_DIR = os.environ.get("LOCAL_LAKEHOUSE_DIR", "/data/local_lakehouse")
 try:
     SPARK_LOCAL_THREADS = max(1, int(os.environ.get("SPARK_LOCAL_THREADS", "1")))
 except ValueError:
@@ -29,24 +32,117 @@ SPARK_MASTER = os.environ.get("SPARK_MASTER", f"local[{SPARK_LOCAL_THREADS}]")
 if SPARK_MASTER.startswith("spark://"):
     SPARK_MASTER = f"local[{SPARK_LOCAL_THREADS}]"
 
-SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "768m")
-SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "768m")
-SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "4")
+SPARK_DRIVER_MEMORY = os.environ.get("SPARK_DRIVER_MEMORY", "512m")
+SPARK_EXECUTOR_MEMORY = os.environ.get("SPARK_EXECUTOR_MEMORY", "512m")
+SPARK_SHUFFLE_PARTITIONS = os.environ.get("SPARK_SHUFFLE_PARTITIONS", "2")
+SPARK_DEFAULT_PARALLELISM = os.environ.get("SPARK_DEFAULT_PARALLELISM", str(max(1, SPARK_LOCAL_THREADS)))
+SPARK_SQL_FILES_MAX_PARTITION_BYTES = os.environ.get("SPARK_SQL_FILES_MAX_PARTITION_BYTES", "32m")
+SPARK_ADVISORY_PARTITION_SIZE = os.environ.get("SPARK_ADVISORY_PARTITION_SIZE", "16m")
+SPARK_DELTA_JARS = os.environ.get("SPARK_DELTA_JARS", "/opt/delta-jars/*")
+try:
+    HDFS_PROBE_RETRIES = max(1, int(os.environ.get("HDFS_PROBE_RETRIES", "12")))
+except ValueError:
+    HDFS_PROBE_RETRIES = 12
+try:
+    HDFS_PROBE_INTERVAL_SECONDS = max(0.1, float(os.environ.get("HDFS_PROBE_INTERVAL_SECONDS", "2.5")))
+except ValueError:
+    HDFS_PROBE_INTERVAL_SECONDS = 2.5
 
 try:
-    RF_NUM_TREES = max(1, int(os.environ.get("RF_NUM_TREES", "20")))
+    RF_NUM_TREES = max(1, int(os.environ.get("RF_NUM_TREES", "8")))
 except ValueError:
-    RF_NUM_TREES = 20
+    RF_NUM_TREES = 8
 
 try:
-    RF_MAX_DEPTH = max(1, int(os.environ.get("RF_MAX_DEPTH", "4")))
+    RF_MAX_DEPTH = max(1, int(os.environ.get("RF_MAX_DEPTH", "3")))
 except ValueError:
-    RF_MAX_DEPTH = 4
+    RF_MAX_DEPTH = 3
 
-SILVER_FEATURE = f"{HDFS_URL}/data/silver/feature_matrix"
-SILVER_GT = f"{HDFS_URL}/data/silver/ground_truth"
-MODELS_PATH = f"{HDFS_URL}/data/models"
-SILVER_METRICS = f"{HDFS_URL}/data/silver/model_metrics"
+LAKEHOUSE_ROOT = None
+STORAGE_BACKEND = "unresolved"
+SILVER_FEATURE = None
+SILVER_GT = None
+MODELS_PATH = None
+SILVER_METRICS = None
+SILVER_LATEST = None
+
+
+def resolve_delta_jars():
+    jars = []
+    for pattern in SPARK_DELTA_JARS.split(","):
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        matches = glob.glob(pattern)
+        if matches:
+            jars.extend(matches)
+        elif os.path.exists(pattern):
+            jars.append(pattern)
+    return sorted(set(jars))
+
+
+def configure_delta(builder):
+    jars = resolve_delta_jars()
+    if jars:
+        return builder.config("spark.jars", ",".join(jars))
+
+    from delta import configure_spark_with_delta_pip
+    return configure_spark_with_delta_pip(builder)
+
+
+def hdfs_accessible(spark) -> bool:
+    if not HDFS_URL.startswith("hdfs://"):
+        return False
+    last_error = None
+    for attempt in range(1, HDFS_PROBE_RETRIES + 1):
+        try:
+            jvm = spark._jvm
+            conf = spark._jsc.hadoopConfiguration()
+            uri = jvm.java.net.URI(HDFS_URL)
+            fs = jvm.org.apache.hadoop.fs.FileSystem.get(uri, conf)
+            if fs.exists(jvm.org.apache.hadoop.fs.Path("/")):
+                return True
+        except Exception as e:
+            last_error = e
+        if attempt < HDFS_PROBE_RETRIES:
+            time.sleep(HDFS_PROBE_INTERVAL_SECONDS)
+    print(f"HDFS probe failed after retries, using local lakehouse fallback: {last_error}")
+    return False
+
+
+def configure_lakehouse_paths(spark):
+    global LAKEHOUSE_ROOT, STORAGE_BACKEND, SILVER_FEATURE, SILVER_GT, MODELS_PATH, SILVER_METRICS, SILVER_LATEST
+    if LAKEHOUSE_ROOT:
+        return
+
+    local_root = os.path.abspath(LOCAL_LAKEHOUSE_DIR)
+    local_marker = os.path.join(local_root, ".use_local_fallback")
+    if STORAGE_MODE == "local":
+        use_hdfs = False
+    elif STORAGE_MODE == "hdfs":
+        use_hdfs = True
+    elif os.path.exists(local_marker):
+        use_hdfs = False
+    else:
+        use_hdfs = hdfs_accessible(spark)
+
+    if use_hdfs:
+        STORAGE_BACKEND = "hdfs"
+        LAKEHOUSE_ROOT = f"{HDFS_URL.rstrip('/')}/data"
+    else:
+        STORAGE_BACKEND = "local"
+        os.makedirs(local_root, exist_ok=True)
+        with open(local_marker, "a", encoding="utf-8"):
+            pass
+        LAKEHOUSE_ROOT = f"file://{local_root}"
+
+    root = LAKEHOUSE_ROOT.rstrip("/")
+    SILVER_FEATURE = f"{root}/silver/feature_matrix"
+    SILVER_GT = f"{root}/silver/ground_truth"
+    MODELS_PATH = f"{root}/models"
+    SILVER_METRICS = f"{root}/silver/model_metrics"
+    SILVER_LATEST = f"{root}/silver/latest_indicators"
+    print(f"Lakehouse storage backend={STORAGE_BACKEND} root={LAKEHOUSE_ROOT}")
 
 
 def create_spark():
@@ -56,18 +152,28 @@ def create_spark():
         .master(SPARK_MASTER)
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        .config("spark.databricks.delta.schema.autoMerge.enabled", "true")
         .config("spark.hadoop.fs.defaultFS", HDFS_URL)
         .config("spark.hadoop.dfs.client.use.datanode.hostname", "true")
         .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
         .config("spark.executor.memory", SPARK_EXECUTOR_MEMORY)
         .config("spark.driver.maxResultSize", "128m")
+        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+        .config("spark.kryoserializer.buffer.max", "128m")
         .config("spark.sql.shuffle.partitions", SPARK_SHUFFLE_PARTITIONS)
-        .config("spark.default.parallelism", SPARK_LOCAL_THREADS)
+        .config("spark.default.parallelism", SPARK_DEFAULT_PARALLELISM)
+        .config("spark.sql.files.maxPartitionBytes", SPARK_SQL_FILES_MAX_PARTITION_BYTES)
+        .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", SPARK_ADVISORY_PARTITION_SIZE)
         .config("spark.python.worker.memory", "256m")
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+        .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
+        .config("spark.locality.wait", "0")
+        .config("spark.ui.enabled", "false")
     )
-    return configure_spark_with_delta_pip(builder).getOrCreate()
+    spark = configure_delta(builder).getOrCreate()
+    configure_lakehouse_paths(spark)
+    return spark
 
 
 def main():
@@ -112,7 +218,7 @@ def main():
 
     # Also join with latest indicators to get per-RT features matched to ground truth
     try:
-        latest_df = spark.read.format("delta").load(f"{HDFS_URL}/data/silver/latest_indicators")
+        latest_df = spark.read.format("delta").load(SILVER_LATEST)
         ml_df = latest_df.join(gt_clean, on="id_wilayah", how="inner")
     except Exception:
         # Fall back to feature_matrix joined by kelurahan if possible

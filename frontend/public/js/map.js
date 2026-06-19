@@ -1,6 +1,6 @@
 /**
- * map.js — Leaflet.js choropleth map with real-time SSE updates
- * Geospatial Big Data Analytics - Pemetaan Permukiman Kumuh Surabaya
+ * map.js - Leaflet.js choropleth map with live updates
+ * Pemetaan Permukiman Kumuh Surabaya
  */
 
 const API_BASE = '/api';
@@ -15,34 +15,47 @@ const map = L.map('main-map', {
   preferCanvas: true,
 });
 
-// Base tile layers
-const tiles = {
-  dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+function standardTileUrl() {
+  const theme = document.documentElement.dataset.theme;
+  const variant = theme === 'dark' ? 'dark_all' : 'light_all';
+  return `https://{s}.basemaps.cartocdn.com/${variant}/{z}/{x}/{y}{r}.png`;
+}
+
+function createStandardTileLayer() {
+  return L.tileLayer(standardTileUrl(), {
     attribution: '© OpenStreetMap contributors © CARTO',
     subdomains: 'abcd',
     maxZoom: 19,
-  }),
+  });
+}
+
+// Base tile layers
+const tiles = {
+  standard: createStandardTileLayer(),
   satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     attribution: '© Esri',
     maxZoom: 19,
   }),
 };
-tiles.dark.addTo(map);
-window._activeTile = 'dark';
+tiles.standard.addTo(map);
+window._activeTile = 'standard';
 
 // ============================================================
 // RISK COLOR SCHEME
 // ============================================================
-const RISK_COLORS = {
-  'Ringan':       { fill: '#22c55e', stroke: '#16a34a' },
-  'Sedang':       { fill: '#eab308', stroke: '#ca8a04' },
-  'Berat':        { fill: '#f97316', stroke: '#ea580c' },
-  'Sangat Berat': { fill: '#ef4444', stroke: '#dc2626' },
-  'Belum Didata': { fill: '#475569', stroke: '#334155' },
-};
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
 function getRiskColor(level) {
-  return RISK_COLORS[level] || RISK_COLORS['Belum Didata'];
+  const colors = {
+    'Ringan':       { fill: cssVar('--risk-ringan'), stroke: cssVar('--risk-ringan') },
+    'Sedang':       { fill: cssVar('--risk-sedang'), stroke: cssVar('--risk-sedang') },
+    'Berat':        { fill: cssVar('--risk-berat'), stroke: cssVar('--risk-berat') },
+    'Sangat Berat': { fill: cssVar('--risk-sangat-berat'), stroke: cssVar('--risk-sangat-berat') },
+    'Belum Didata': { fill: cssVar('--risk-none'), stroke: cssVar('--risk-none') },
+  };
+  return colors[level] || colors['Belum Didata'];
 }
 
 function getRiskBadgeClass(level) {
@@ -76,8 +89,32 @@ let mapLoadToken = 0;
 let nextMapOffset = 0;
 const MAP_PAGE_SIZE = 50;
 
+function getJSON(url, options = {}) {
+  if (window.apiCache?.getJSON) return window.apiCache.getJSON(url, options);
+  return fetch(url, options.fetchOptions || {}).then(res => {
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    return res.json();
+  });
+}
+
+function activeMapEndpoint() {
+  return selectedLayer === 'prediction' ? 'prediction' : 'risk-score';
+}
+
 function styleFeature(feature) {
   const props = feature.properties;
+  if (selectedLayer === 'prediction') {
+    const colors = getPredictionColor(props);
+    return {
+      fillColor: colors.fill,
+      weight: 1.5,
+      opacity: 0.9,
+      color: colors.stroke,
+      fillOpacity: colors.opacity,
+      dashArray: props.label_prediksi == null ? '4 4' : null,
+    };
+  }
+
   const level = props.risk_level || 'Belum Didata';
   const colors = getRiskColor(level);
   return {
@@ -87,6 +124,37 @@ function styleFeature(feature) {
     color: colors.stroke,
     fillOpacity: 0.65,
   };
+}
+
+function getPredictionColor(props) {
+  if (props.label_prediksi == null && props.proba_kumuh == null) {
+    return { fill: cssVar('--risk-none'), stroke: cssVar('--risk-none'), opacity: 0.35 };
+  }
+
+  const proba = Number(props.proba_kumuh);
+  if (Number.isFinite(proba)) {
+    if (proba >= 0.7) return { fill: cssVar('--risk-sangat-berat'), stroke: cssVar('--risk-sangat-berat'), opacity: 0.72 };
+    if (proba >= 0.5) return { fill: cssVar('--risk-berat'), stroke: cssVar('--risk-berat'), opacity: 0.68 };
+    return { fill: cssVar('--risk-ringan'), stroke: cssVar('--risk-ringan'), opacity: 0.6 };
+  }
+
+  return Number(props.label_prediksi) === 1
+    ? { fill: cssVar('--risk-sangat-berat'), stroke: cssVar('--risk-sangat-berat'), opacity: 0.7 }
+    : { fill: cssVar('--risk-ringan'), stroke: cssVar('--risk-ringan'), opacity: 0.6 };
+}
+
+function getPredictionBadgeClass(props) {
+  if (props.label_prediksi == null && props.proba_kumuh == null) return 'badge-none';
+  return Number(props.label_prediksi) === 1 || Number(props.proba_kumuh) >= 0.5
+    ? 'badge-sangat-berat'
+    : 'badge-ringan';
+}
+
+function getPredictionLabel(props) {
+  if (props.label_prediksi == null && props.proba_kumuh == null) return 'Belum Ada Prediksi';
+  return Number(props.label_prediksi) === 1 || Number(props.proba_kumuh) >= 0.5
+    ? 'Berpotensi Kumuh'
+    : 'Tidak Kumuh';
 }
 
 function highlightFeature(e) {
@@ -126,33 +194,39 @@ function layerBounds(layer) {
 }
 
 function buildPopup(props) {
-  const score = props.risk_score != null ? `${props.risk_score?.toFixed(1)}` : '—';
+  const score = props.risk_score != null ? `${props.risk_score?.toFixed(1)}` : '--';
   const level = props.risk_level || 'Belum Didata';
-  const proba = props.proba_kumuh != null ? `${(props.proba_kumuh * 100)?.toFixed(1)}%` : '—';
+  const proba = props.proba_kumuh != null ? `${(props.proba_kumuh * 100)?.toFixed(1)}%` : '--';
   const jiwa = (props.total_jiwa || 0).toLocaleString('id-ID');
+  const predictionLabel = getPredictionLabel(props);
+  const predictionBadge = getPredictionBadgeClass(props);
 
   const factors = [props.top_faktor_1, props.top_faktor_2, props.top_faktor_3]
     .filter(Boolean)
-    .map(f => `<span style="background:rgba(59,130,246,0.15);color:#93c5fd;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.7rem;">${f}</span>`)
+    .map(f => `<span style="background:var(--civic-blue-soft);color:var(--civic-blue);padding:0.18rem 0.5rem;border-radius:999px;font-size:0.7rem;font-weight:700;">${f}</span>`)
     .join(' ');
 
   return `
     <div class="popup-header">
       <div class="popup-title">RT ${props.rt} / RW ${props.rw}</div>
-      <div class="popup-subtitle">Kel. ${props.kelurahan} · Kec. ${props.kecamatan}</div>
+      <div class="popup-subtitle">Kel. ${props.kelurahan} - Kec. ${props.kecamatan}</div>
     </div>
     <div class="popup-body">
       <div class="popup-row">
-        <span class="popup-row-label">Risk Level</span>
+        <span class="popup-row-label">Tingkat Risiko</span>
         <span class="badge ${getRiskBadgeClass(level)}">${level}</span>
       </div>
       <div class="popup-row">
-        <span class="popup-row-label">Risk Score</span>
+        <span class="popup-row-label">Skor Risiko</span>
         <span class="popup-row-value">${score}</span>
       </div>
       <div class="popup-row">
-        <span class="popup-row-label">Prob. Kumuh</span>
+        <span class="popup-row-label">Probabilitas Kumuh</span>
         <span class="popup-row-value">${proba}</span>
+      </div>
+      <div class="popup-row">
+        <span class="popup-row-label">Prediksi</span>
+        <span class="badge ${predictionBadge}">${predictionLabel}</span>
       </div>
       <div class="popup-row">
         <span class="popup-row-label">Jiwa</span>
@@ -162,7 +236,7 @@ function buildPopup(props) {
     </div>
     <div class="popup-footer">
       <a href="/wilayah.html?id=${props.id_wilayah}" class="btn btn-primary btn-sm" style="width:100%;text-align:center;">
-        📊 Lihat Riwayat
+        Lihat Riwayat
       </a>
     </div>
   `;
@@ -229,6 +303,21 @@ function mergeGeoData(data, append) {
   rawGeoData.has_more = Boolean(data.has_more);
 }
 
+function applyMapPage(data, append, activeToken, offset, fromBackground = false) {
+  if (activeToken !== mapLoadToken) return;
+
+  mergeGeoData(data, append);
+  nextMapOffset = offset + (data.features || []).length;
+  renderMapLayer();
+  if (!append) updateSummaryStats();
+
+  if (!fromBackground && data.has_more && (data.features || []).length > 0) {
+    setTimeout(() => loadMapData({ append: true, token: activeToken }), 250);
+  } else if (!fromBackground) {
+    showMapLoading(false);
+  }
+}
+
 async function loadMapData({ append = false, token = null } = {}) {
   const activeToken = append ? token : ++mapLoadToken;
   const offset = append ? nextMapOffset : 0;
@@ -238,24 +327,16 @@ async function loadMapData({ append = false, token = null } = {}) {
   }
 
   try {
-    const res = await fetch(`${API_BASE}/map/risk-score?${getMapQuery(offset)}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (activeToken !== mapLoadToken) return;
-
-    mergeGeoData(data, append);
-    nextMapOffset = offset + (data.features || []).length;
-    renderMapLayer();
-    if (!append) updateSummaryStats();
-
-    if (data.has_more && (data.features || []).length > 0) {
-      setTimeout(() => loadMapData({ append: true, token: activeToken }), 250);
-    } else {
-      showMapLoading(false);
-    }
+    const url = `${API_BASE}/map/${activeMapEndpoint()}?${getMapQuery(offset)}`;
+    const data = await getJSON(url, {
+      ttl: 45 * 1000,
+      staleTtl: 24 * 60 * 60 * 1000,
+      onUpdate: fresh => applyMapPage(fresh, append, activeToken, offset, true),
+    });
+    applyMapPage(data, append, activeToken, offset);
   } catch (err) {
     console.error('Failed to load map data:', err);
-    if (!append) showToast('error', 'Gagal memuat peta', err.message);
+    if (!append && !rawGeoData) showToast('error', 'Gagal memuat peta', err.message);
     showMapLoading(false);
   }
 }
@@ -271,9 +352,14 @@ async function loadWilayahByIds(ids, { focusFirst = false } = {}) {
   });
 
   try {
-    const res = await fetch(`${API_BASE}/map/risk-score?${params.toString()}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const data = await getJSON(`${API_BASE}/map/${activeMapEndpoint()}?${params.toString()}`, {
+      ttl: 30 * 1000,
+      staleTtl: 24 * 60 * 60 * 1000,
+      onUpdate: fresh => {
+        mergeGeoData(fresh, true);
+        renderMapLayer();
+      },
+    });
     mergeGeoData(data, true);
     renderMapLayer();
     if (focusFirst && uniqueIds[0]) {
@@ -312,29 +398,42 @@ function updateLayerList(features) {
   if (!list) return;
 
   if (!features || features.length === 0) {
-    list.innerHTML = '<div class="empty-state"><div class="empty-icon">🗺️</div><div class="empty-msg">Belum ada data wilayah. Daftarkan wilayah dan masukkan data survei.</div></div>';
+    list.innerHTML = '<div class="empty-state"><div class="empty-msg">Belum ada data wilayah. Daftarkan wilayah dan masukkan data survei.</div></div>';
     return;
   }
 
-  // Sort by risk_score desc
   const sorted = [...features].sort((a, b) => {
+    if (selectedLayer === 'prediction') {
+      return (b.properties.proba_kumuh || 0) - (a.properties.proba_kumuh || 0);
+    }
     return (b.properties.risk_score || 0) - (a.properties.risk_score || 0);
   });
 
   list.innerHTML = sorted.slice(0, 20).map(f => {
     const p = f.properties;
     const level = p.risk_level || 'Belum Didata';
-    const score = p.risk_score != null ? p.risk_score?.toFixed(0) : '—';
+    const score = p.risk_score != null ? p.risk_score?.toFixed(0) : '--';
     const barClass = getRiskBarClass(level);
     const pct = p.risk_score ? Math.min(p.risk_score, 100) : 0;
+    const probaPct = p.proba_kumuh != null ? Math.round(p.proba_kumuh * 100) : null;
+    const predictionLabel = getPredictionLabel(p);
+    const predictionBadge = getPredictionBadgeClass(p);
+    const primaryValue = selectedLayer === 'prediction' ? (probaPct != null ? `${probaPct}%` : '--') : score;
+    const primaryBadge = selectedLayer === 'prediction' ? predictionBadge : getRiskBadgeClass(level);
+    const barWidth = selectedLayer === 'prediction' ? (probaPct || 0) : pct;
+    const barStyle = selectedLayer === 'prediction'
+      ? `background:${getPredictionColor(p).fill};`
+      : '';
+    const subtitle = selectedLayer === 'prediction' ? predictionLabel : level;
     return `
       <div class="layer-item" onclick="focusWilayah('${p.id_wilayah}')" style="padding:0.75rem;border-bottom:1px solid var(--border);cursor:pointer;transition:background 0.15s;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.4rem;">
           <span style="font-size:0.8125rem;font-weight:600;color:var(--text-primary);">RT${p.rt}/RW${p.rw} ${p.kelurahan}</span>
-          <span class="badge ${getRiskBadgeClass(level)}" style="font-size:0.6875rem;">${score}</span>
+          <span class="badge ${primaryBadge}" style="font-size:0.6875rem;">${primaryValue}</span>
         </div>
+        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.35rem;">${subtitle}</div>
         <div class="risk-bar-container">
-          <div class="risk-bar ${barClass}" style="width:${pct}%;"></div>
+          <div class="risk-bar ${barClass}" style="width:${barWidth}%;${barStyle}"></div>
         </div>
       </div>
     `;
@@ -359,164 +458,27 @@ window.focusWilayah = focusWilayah;
 // ============================================================
 async function updateSummaryStats() {
   try {
-    const res = await fetch(`${API_BASE}/summary`);
-    if (!res.ok) return;
-    const data = await res.json();
-
-    const setEl = (id, val) => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = val;
-    };
-
-    setEl('stat-total-wilayah', (data.total_wilayah || 0).toLocaleString('id-ID'));
-    setEl('stat-total-kumuh', (data.total_kumuh || 0).toLocaleString('id-ID'));
-    setEl('stat-jiwa', (data.total_jiwa_terdampak || 0).toLocaleString('id-ID'));
-    setEl('stat-events', (data.total_survey_events || 0).toLocaleString('id-ID'));
+    const data = await getJSON(`${API_BASE}/summary`, {
+      ttl: 60 * 1000,
+      staleTtl: 24 * 60 * 60 * 1000,
+      onUpdate: renderSummaryStats,
+    });
+    renderSummaryStats(data);
   } catch (e) {
     console.warn('Stats update failed:', e);
   }
 }
 
-// ============================================================
-// REAL-TIME SSE
-// ============================================================
-let sseSource = null;
-let reconnectTimer = null;
-let pipelinePollTimer = null;
-let pipelineVersion = null;
-let pipelineActive = false;
-
-function isPipelineActive(pipeline) {
-  if (!pipeline) return false;
-  return Boolean(pipeline.running || pipeline.pending || ['queued', 'running'].includes(pipeline.state));
-}
-
-function startPipelinePolling() {
-  if (pipelinePollTimer) return;
-  pipelinePollTimer = setInterval(fetchPipelineStatus, 5000);
-}
-
-function stopPipelinePolling() {
-  if (!pipelinePollTimer) return;
-  clearInterval(pipelinePollTimer);
-  pipelinePollTimer = null;
-}
-
-async function fetchPipelineStatus() {
-  try {
-    const res = await fetch(`${API_BASE}/pipeline/status`, { cache: 'no-store' });
-    if (!res.ok) return;
-    syncPipelineStatus(await res.json());
-  } catch (err) {
-    console.warn('Pipeline status check failed:', err);
-  }
-}
-
-function syncPipelineStatus(pipeline) {
-  if (!pipeline) return;
-
-  const wasActive = pipelineActive;
-  const active = isPipelineActive(pipeline);
-  const version = Number(pipeline.version || 0);
-  pipelineActive = active;
-  updateProcessingIndicator(active);
-
-  if (active) {
-    startPipelinePolling();
-  } else {
-    stopPipelinePolling();
-  }
-
-  if (pipelineVersion == null) {
-    pipelineVersion = version;
-    return;
-  }
-
-  if (!active && version > pipelineVersion && wasActive) {
-    pipelineVersion = version;
-    refreshMapAfterPipeline(pipeline.affected_ids || []);
-    return;
-  }
-
-  if (version > pipelineVersion) {
-    pipelineVersion = version;
-  }
-}
-
-function connectSSE() {
-  if (sseSource) {
-    sseSource.close();
-  }
-
-  sseSource = new EventSource(`${API_BASE}/stream/updates`);
-
-  sseSource.onopen = () => {
-    console.log('SSE connected');
-    updateSSEStatus(true);
-    if (reconnectTimer) clearTimeout(reconnectTimer);
+function renderSummaryStats(data) {
+  const setEl = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
   };
 
-  sseSource.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      handleSSEMessage(data);
-    } catch (e) {
-      console.warn('SSE parse error:', e);
-    }
-  };
-
-  sseSource.onerror = () => {
-    updateSSEStatus(false);
-    sseSource.close();
-    // Reconnect after 5 seconds
-    reconnectTimer = setTimeout(connectSSE, 5000);
-  };
-}
-
-function handleSSEMessage(data) {
-  console.log('SSE event:', data.type, data);
-
-  if (data.type === 'map_updated') {
-    showToast('success', 'Peta diperbarui', 'Data baru telah diproses dan peta telah diupdate.');
-    pipelineActive = false;
-    if (data.pipeline?.version != null) pipelineVersion = Number(data.pipeline.version);
-    updateProcessingIndicator(false);
-    stopPipelinePolling();
-    refreshMapAfterPipeline(data.affected_ids || data.pipeline?.affected_ids || []);
-  } else if (data.type === 'processing_failed') {
-    showToast('error', 'Pipeline gagal', 'Pemrosesan selesai dengan error. Cek log API/consumer.');
-    pipelineActive = false;
-    if (data.pipeline?.version != null) pipelineVersion = Number(data.pipeline.version);
-    updateProcessingIndicator(false);
-    stopPipelinePolling();
-  } else if (data.type === 'wilayah_registered') {
-    loadWilayahByIds(data.affected_ids || [data.id_wilayah]);
-  } else if (data.type === 'processing_started') {
-    showToast('info', 'Processing...', 'Pipeline sedang memproses data baru...');
-    syncPipelineStatus(data.pipeline || { state: 'running', running: true });
-  } else if (data.type === 'processing_queued') {
-    updateProcessingIndicator(true);
-    syncPipelineStatus(data.pipeline || { state: 'queued', pending: true });
-  } else if (data.type === 'heartbeat') {
-    // Keep alive, no UI action
-  } else if (data.type === 'connected') {
-    console.log('SSE stream connected at', data.timestamp);
-    syncPipelineStatus(data.pipeline);
-  }
-}
-
-function updateSSEStatus(live) {
-  const dot = document.getElementById('sse-status-dot');
-  const label = document.getElementById('sse-status-label');
-  if (dot) dot.className = `status-dot ${live ? 'live' : ''}`;
-  if (label) label.textContent = live ? 'Live' : 'Reconnecting...';
-}
-
-function updateProcessingIndicator(active) {
-  const el = document.getElementById('processing-indicator');
-  if (el) {
-    el.style.display = active ? 'flex' : 'none';
-  }
+  setEl('stat-total-wilayah', (data.total_wilayah || 0).toLocaleString('id-ID'));
+  setEl('stat-total-kumuh', (data.total_kumuh || 0).toLocaleString('id-ID'));
+  setEl('stat-jiwa', (data.total_jiwa_terdampak || 0).toLocaleString('id-ID'));
+  setEl('stat-events', (data.total_survey_events || 0).toLocaleString('id-ID'));
 }
 
 // ============================================================
@@ -526,11 +488,11 @@ function showToast(type, title, msg, duration = 4000) {
   const container = document.getElementById('toast-container');
   if (!container) return;
 
-  const icons = { success: '✅', error: '❌', info: 'ℹ️', warning: '⚠️' };
+  const icons = { success: 'SUKSES', error: 'GAGAL', info: 'INFO', warning: 'PERLU CEK' };
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
   toast.innerHTML = `
-    <span class="toast-icon">${icons[type] || 'ℹ️'}</span>
+    <span class="toast-icon">${icons[type] || 'INFO'}</span>
     <div class="toast-content">
       <div class="toast-title">${title}</div>
       ${msg ? `<div class="toast-msg">${msg}</div>` : ''}
@@ -552,18 +514,107 @@ window.showToast = showToast;
 // ============================================================
 function setLayerToggle(mode) {
   selectedLayer = mode;
-  document.querySelectorAll('.toggle-btn').forEach(b => {
+  document.querySelectorAll('.toggle-btn[data-layer]').forEach(b => {
     b.classList.toggle('active', b.dataset.layer === mode);
   });
+  updateLegend();
+  showMapLoading(true, mode === 'prediction' ? 'Menampilkan prediksi...' : 'Menampilkan skor risiko...');
   renderMapLayer();
+  setTimeout(() => showMapLoading(false), 250);
 }
 window.setLayerToggle = setLayerToggle;
+
+function updateLegend() {
+  const title = document.getElementById('legend-title');
+  const legend = document.getElementById('map-legend');
+  if (!legend) return;
+
+  if (selectedLayer === 'prediction') {
+    if (title) title.textContent = 'Legenda Prediksi';
+    legend.innerHTML = `
+      <div class="legend-item">
+        <div class="legend-color" style="background:var(--risk-ringan);"></div>
+        <span>Tidak kumuh (&lt;50%)</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color" style="background:var(--risk-berat);"></div>
+        <span>Potensi sedang (50-70%)</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color" style="background:var(--risk-sangat-berat);"></div>
+        <span>Potensi tinggi (>=70%)</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-color" style="background:var(--risk-none);"></div>
+        <span>Belum ada prediksi</span>
+      </div>
+    `;
+    return;
+  }
+
+  if (title) title.textContent = 'Legenda Risiko';
+  legend.innerHTML = `
+    <div class="legend-item">
+      <div class="legend-color" style="background:var(--risk-ringan);"></div>
+      <span>Ringan (0-25)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-color" style="background:var(--risk-sedang);"></div>
+      <span>Sedang (25-50)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-color" style="background:var(--risk-berat);"></div>
+      <span>Berat (50-75)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-color" style="background:var(--risk-sangat-berat);"></div>
+      <span>Sangat Berat (75-100)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-color" style="background:var(--risk-none);"></div>
+      <span>Belum Didata</span>
+    </div>
+  `;
+}
+
+function setTileToggle(mode) {
+  if (mode === window._activeTile) return;
+
+  if (mode === 'standard') {
+    map.removeLayer(tiles.satellite);
+    tiles.standard.addTo(map);
+  } else if (mode === 'satellite') {
+    map.removeLayer(tiles.standard);
+    tiles.satellite.addTo(map);
+  } else {
+    return;
+  }
+
+  window._activeTile = mode;
+  document.querySelectorAll('.toggle-btn[data-tile]').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tile === mode);
+  });
+}
+window.setTileToggle = setTileToggle;
+
+function refreshStandardTiles() {
+  if (map.hasLayer(tiles.standard)) {
+    map.removeLayer(tiles.standard);
+    tiles.standard = createStandardTileLayer();
+    tiles.standard.addTo(map);
+    return;
+  }
+
+  tiles.standard = createStandardTileLayer();
+}
 
 // ============================================================
 // MAP LOADING INDICATOR
 // ============================================================
-function showMapLoading(show) {
+function showMapLoading(show, label = 'Memuat peta...') {
   const el = document.getElementById('map-loading');
+  const text = document.getElementById('map-loading-text');
+  if (text) text.textContent = label;
   if (el) el.style.display = show ? 'flex' : 'none';
 }
 
@@ -579,9 +630,21 @@ function debounce(fn, delay = 400) {
 // INIT
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
+  updateLegend();
   map.whenReady(() => loadMapData());
-  connectSSE();
-  fetchPipelineStatus();
+
+  window.addEventListener('pipeline:complete', (event) => {
+    refreshMapAfterPipeline(event.detail?.affected_ids || event.detail?.pipeline?.affected_ids || []);
+  });
+
+  window.addEventListener('pipeline:failed', () => {});
+
+  window.addEventListener('live:update', (event) => {
+    const data = event.detail || {};
+    if (data.type === 'wilayah_registered') {
+      loadWilayahByIds(data.affected_ids || [data.id_wilayah]);
+    }
+  });
 
   map.on('moveend', debounce(() => {
     selectedPoint = null;
@@ -593,25 +656,18 @@ document.addEventListener('DOMContentLoaded', () => {
     loadMapData();
   });
 
-  // Toggle tile buttons
-  document.getElementById('btn-tile-dark')?.addEventListener('click', () => {
-    if (window._activeTile !== 'dark') {
-      map.removeLayer(tiles.satellite);
-      tiles.dark.addTo(map);
-      window._activeTile = 'dark';
-    }
-  });
-
-  document.getElementById('btn-tile-satellite')?.addEventListener('click', () => {
-    if (window._activeTile !== 'satellite') {
-      map.removeLayer(tiles.dark);
-      tiles.satellite.addTo(map);
-      window._activeTile = 'satellite';
-    }
+  // Tile toggle buttons
+  document.querySelectorAll('.toggle-btn[data-tile]').forEach(btn => {
+    btn.addEventListener('click', () => setTileToggle(btn.dataset.tile));
   });
 
   // Layer toggle buttons
   document.querySelectorAll('.toggle-btn[data-layer]').forEach(btn => {
     btn.addEventListener('click', () => setLayerToggle(btn.dataset.layer));
+  });
+
+  window.addEventListener('themechange', () => {
+    refreshStandardTiles();
+    renderMapLayer();
   });
 });

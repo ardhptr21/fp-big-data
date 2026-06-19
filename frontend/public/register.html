@@ -3,13 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Daftarkan Wilayah Baru — SlumMap Surabaya</title>
+  <title>Daftarkan Wilayah Baru | SlumMap Surabaya</title>
   <meta name="description" content="Form pendaftaran wilayah RT/RW baru ke sistem master wilayah Surabaya.">
 
   <!-- Leaflet for mini map -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
+  <script src="/js/theme.js"></script>
+  <script src="/js/pipeline-status.js"></script>
+  <script src="/js/api-cache.js"></script>
   <link rel="stylesheet" href="/css/style.css">
   <style>
     .register-page {
@@ -20,7 +23,7 @@
 
     #mini-map {
       height: 300px;
-      border-radius: 10px;
+      border-radius: 8px;
       border: 1px solid var(--border);
       background: var(--bg-primary);
     }
@@ -40,14 +43,14 @@
 
 <nav class="nav">
   <a href="/" class="nav-brand">
-    <div class="nav-brand-icon">🗺️</div>
+    <div class="nav-brand-icon">GIS</div>
     <span>SlumMap Surabaya</span>
   </a>
   <ul class="nav-links">
-    <li><a href="/">🗺️ Peta Utama</a></li>
-    <li><a href="/input.html">📝 Input Data</a></li>
-    <li><a href="/prioritas.html">🚨 Prioritas</a></li>
-    <li><a href="/register.html" class="active">➕ Wilayah Baru</a></li>
+    <li><a href="/">Peta Utama</a></li>
+    <li><a href="/input.html">Isi Survei</a></li>
+    <li><a href="/prioritas.html">Prioritas</a></li>
+    <li><a href="/register.html" class="active">Wilayah Baru</a></li>
   </ul>
 </nav>
 
@@ -55,7 +58,7 @@
   <div class="register-page">
 
     <div class="page-header">
-      <h1 class="page-title">➕ Daftarkan Wilayah Baru</h1>
+      <h1 class="page-title">Daftarkan Wilayah Baru</h1>
       <p class="page-subtitle">Daftarkan RT/RW baru ke master wilayah sebelum memasukkan data survei. Satu kali daftarkan, tidak perlu diulang.</p>
     </div>
 
@@ -89,7 +92,7 @@
           <!-- ID Preview -->
           <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:0.75rem;font-size:0.8125rem;">
             <span style="color:var(--text-muted);">ID Wilayah yang akan dibuat: </span>
-            <span id="id-preview" style="font-family:monospace;color:var(--accent-teal);">—</span>
+            <span id="id-preview" style="font-family:monospace;color:var(--accent-teal);">--</span>
           </div>
         </div>
       </div>
@@ -110,7 +113,7 @@
               <input type="number" class="form-control" id="total_jiwa" min="0" value="0">
             </div>
             <div class="form-group">
-              <label class="form-label" for="luas_m2">Luas (m²)</label>
+              <label class="form-label" for="luas_m2">Luas (m2)</label>
               <input type="number" class="form-control" id="luas_m2" min="0" step="0.1" value="0">
             </div>
           </div>
@@ -150,10 +153,10 @@
       <!-- Submit -->
       <div style="display:flex;gap:1rem;align-items:center;">
         <button type="submit" class="btn btn-primary" id="register-btn" style="padding:0.75rem 2rem;">
-          💾 Daftarkan Wilayah
+          Daftarkan Wilayah
         </button>
-        <button type="reset" class="btn btn-secondary" onclick="resetForm()">↩️ Reset</button>
-        <a href="/" class="btn btn-secondary">🗺️ Kembali ke Peta</a>
+        <button type="reset" class="btn btn-secondary" onclick="resetForm()">Atur Ulang</button>
+        <a href="/" class="btn btn-secondary">Kembali ke Peta</a>
       </div>
 
       <div id="register-result" style="margin-top:1.5rem;"></div>
@@ -164,7 +167,7 @@
     <div style="margin-top:2rem;">
       <div class="card">
         <div class="card-header">
-          <span class="card-title">📋 Wilayah Terdaftar</span>
+          <span class="card-title">Wilayah Terdaftar</span>
           <span id="wilayah-count" style="font-size:0.75rem;color:var(--text-muted);"></span>
         </div>
         <div class="table-container">
@@ -195,9 +198,22 @@
 <script>
 const API_BASE = '/api';
 
+function getJSON(url, options = {}) {
+  if (window.apiCache?.getJSON) return window.apiCache.getJSON(url, options);
+  return fetch(url).then(res => {
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    return res.json();
+  });
+}
+
 // ====== Mini Map ======
 const miniMap = L.map('mini-map').setView([-7.2575, 112.7521], 12);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+function miniMapTileUrl() {
+  const variant = document.documentElement.dataset.theme === 'dark' ? 'dark_all' : 'light_all';
+  return `https://{s}.basemaps.cartocdn.com/${variant}/{z}/{x}/{y}{r}.png`;
+}
+
+let miniMapTileLayer = L.tileLayer(miniMapTileUrl(), {
   attribution: '© CARTO', subdomains: 'abcd'
 }).addTo(miniMap);
 
@@ -226,12 +242,13 @@ function buildBoxGeometry(lng, lat) {
 function setGeometryFromMap(lat, lng) {
   selectedLatLng = { lat, lng };
   const geojson = buildBoxGeometry(lng, lat);
+  const themeColor = getComputedStyle(document.documentElement).getPropertyValue('--civic-green').trim();
   if (geometryPreview) geometryPreview.remove();
   geometryPreview = L.geoJSON(geojson, {
     style: {
-      color: '#14b8a6',
+      color: themeColor,
       weight: 2,
-      fillColor: '#14b8a6',
+      fillColor: themeColor,
       fillOpacity: 0.28,
     }
   }).addTo(miniMap);
@@ -239,6 +256,17 @@ function setGeometryFromMap(lat, lng) {
   document.getElementById('geometry_wkt').value = JSON.stringify(geojson, null, 2);
   document.getElementById('map-coords').textContent = `Area sekitar: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 }
+
+window.addEventListener('themechange', () => {
+  miniMap.removeLayer(miniMapTileLayer);
+  miniMapTileLayer = L.tileLayer(miniMapTileUrl(), {
+    attribution: '© CARTO', subdomains: 'abcd'
+  }).addTo(miniMap);
+
+  if (selectedLatLng) {
+    setGeometryFromMap(selectedLatLng.lat, selectedLatLng.lng);
+  }
+});
 
 miniMap.on('click', (e) => {
   const {lat, lng} = e.latlng;
@@ -257,7 +285,7 @@ function buildId() {
   const kel = (document.getElementById('kelurahan').value || '').toUpperCase().replace(/\s+/g, '-').slice(0, 5);
   const rw = document.getElementById('rw').value.padStart(2, '0');
   const rt = document.getElementById('rt').value.padStart(3, '0');
-  if (!kec || !kel || !rw || !rt) return '—';
+  if (!kec || !kel || !rw || !rt) return '--';
   return `SBY-${kec}-${kel}-${rw}-${rt}`;
 }
 
@@ -271,7 +299,7 @@ function buildId() {
 document.getElementById('register-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const id = buildId();
-  if (id === '—') {
+  if (id === '--') {
     showToast('warning', 'Isi semua field wilayah', '');
     return;
   }
@@ -301,63 +329,69 @@ document.getElementById('register-form').addEventListener('submit', async (e) =>
     });
     const data = await res.json();
     if (res.ok || res.status === 201) {
+      window.apiCache?.invalidate('/api/wilayah');
       showToast('success', 'Wilayah berhasil didaftarkan!', `ID: ${id}`);
       document.getElementById('register-result').innerHTML = `
-        <div style="background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.3);border-radius:10px;padding:1rem;display:flex;align-items:center;gap:0.75rem;">
-          <span style="font-size:1.5rem;">✅</span>
+        <div style="background:var(--risk-ringan-bg);border:1px solid var(--risk-ringan-border);border-radius:8px;padding:1rem;display:flex;align-items:center;gap:0.75rem;">
           <div>
             <div style="font-weight:600;color:var(--text-primary);">Wilayah berhasil didaftarkan!</div>
             <div style="font-size:0.8125rem;color:var(--text-secondary);">ID: <code style="color:var(--accent-teal);">${id}</code></div>
           </div>
-          <a href="/input.html" class="btn btn-primary btn-sm" style="margin-left:auto;">📝 Input Data</a>
+          <a href="/input.html" class="btn btn-primary btn-sm" style="margin-left:auto;">Isi Data</a>
         </div>
       `;
       loadWilayahList();
     } else if (res.status === 409) {
       showToast('warning', 'Wilayah sudah terdaftar', `ID ${id} sudah ada di sistem.`);
     } else {
-      throw new Error(data.detail || 'Error');
+      throw new Error(data.detail || 'Terjadi kesalahan');
     }
   } catch (err) {
     showToast('error', 'Gagal mendaftarkan', err.message);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = '💾 Daftarkan Wilayah';
+    btn.innerHTML = 'Daftarkan Wilayah';
   }
 });
 
 // ====== Load existing ======
 async function loadWilayahList() {
   try {
-    const res = await fetch(`${API_BASE}/wilayah`);
-    const data = await res.json();
-    const list = data.wilayah || [];
-    document.getElementById('wilayah-count').textContent = `${list.length} wilayah terdaftar`;
-    const tbody = document.getElementById('wilayah-list-body');
-    if (list.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-icon">🏘️</div><div class="empty-title">Belum ada wilayah terdaftar</div></div></td></tr>`;
-      return;
-    }
-    tbody.innerHTML = list.map(w => `
-      <tr>
-        <td style="font-family:monospace;font-size:0.75rem;">${w.id_wilayah}</td>
-        <td>RT ${w.rt} / RW ${w.rw}</td>
-        <td class="td-primary">${w.kelurahan}</td>
-        <td>${w.kecamatan}</td>
-        <td>${(w.total_kk||0).toLocaleString()}</td>
-        <td>${(w.total_jiwa||0).toLocaleString()}</td>
-        <td>
-          <a href="/wilayah.html?id=${encodeURIComponent(w.id_wilayah)}" class="btn btn-secondary btn-sm">📊 Riwayat</a>
-        </td>
-      </tr>
-    `).join('');
+    const applyWilayahList = data => {
+      const list = data.wilayah || [];
+      document.getElementById('wilayah-count').textContent = `${list.length} wilayah terdaftar`;
+      const tbody = document.getElementById('wilayah-list-body');
+      if (list.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="empty-title">Belum ada wilayah terdaftar</div></div></td></tr>`;
+        return;
+      }
+      tbody.innerHTML = list.map(w => `
+        <tr>
+          <td style="font-family:monospace;font-size:0.75rem;">${w.id_wilayah}</td>
+          <td>RT ${w.rt} / RW ${w.rw}</td>
+          <td class="td-primary">${w.kelurahan}</td>
+          <td>${w.kecamatan}</td>
+          <td>${(w.total_kk||0).toLocaleString()}</td>
+          <td>${(w.total_jiwa||0).toLocaleString()}</td>
+          <td>
+            <a href="/wilayah.html?id=${encodeURIComponent(w.id_wilayah)}" class="btn btn-secondary btn-sm">Riwayat</a>
+          </td>
+        </tr>
+      `).join('');
+    };
+    const data = await getJSON(`${API_BASE}/wilayah`, {
+      ttl: 5 * 60 * 1000,
+      staleTtl: 24 * 60 * 60 * 1000,
+      onUpdate: applyWilayahList,
+    });
+    applyWilayahList(data);
   } catch (e) {
     console.error(e);
   }
 }
 
 function resetForm() {
-  document.getElementById('id-preview').textContent = '—';
+  document.getElementById('id-preview').textContent = '--';
   document.getElementById('register-result').innerHTML = '';
   if (geometryPreview) { geometryPreview.remove(); geometryPreview = null; }
   selectedLatLng = null;
@@ -367,10 +401,10 @@ function resetForm() {
 function showToast(type, title, msg, duration = 4000) {
   const container = document.getElementById('toast-container');
   if (!container) return;
-  const icons = {success:'✅',error:'❌',info:'ℹ️',warning:'⚠️'};
+  const icons = {success:'SUKSES',error:'GAGAL',info:'INFO',warning:'PERLU CEK'};
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.innerHTML = `<span class="toast-icon">${icons[type]||'ℹ️'}</span><div class="toast-content"><div class="toast-title">${title}</div>${msg?`<div class="toast-msg">${msg}</div>`:''}</div>`;
+  toast.innerHTML = `<span class="toast-icon">${icons[type]||'INFO'}</span><div class="toast-content"><div class="toast-title">${title}</div>${msg?`<div class="toast-msg">${msg}</div>`:''}</div>`;
   container.appendChild(toast);
   setTimeout(() => { toast.style.opacity='0'; toast.style.transition='all 0.3s'; setTimeout(()=>toast.remove(),300); }, duration);
 }

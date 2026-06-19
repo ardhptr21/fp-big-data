@@ -3,12 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Riwayat Wilayah — SlumMap Surabaya</title>
-  <meta name="description" content="Riwayat perubahan data survei per wilayah RT/RW — semua event tersimpan sebagai log incremental.">
+  <title>Riwayat Wilayah | SlumMap Surabaya</title>
+  <meta name="description" content="Riwayat perubahan data survei per wilayah RT/RW.">
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
+  <script src="/js/theme.js"></script>
+  <script src="/js/pipeline-status.js"></script>
+  <script src="/js/api-cache.js"></script>
   <link rel="stylesheet" href="/css/style.css">
   <style>
     .history-page {
@@ -29,8 +32,8 @@
     }
 
     .info-note {
-      background: rgba(59, 130, 246, 0.08);
-      border: 1px solid rgba(59, 130, 246, 0.2);
+      background: var(--civic-blue-soft);
+      border: 1px solid var(--accent-blue-glow);
       border-radius: 8px;
       padding: 0.75rem 1rem;
       font-size: 0.8125rem;
@@ -46,14 +49,14 @@
 
 <nav class="nav">
   <a href="/" class="nav-brand">
-    <div class="nav-brand-icon">🗺️</div>
+    <div class="nav-brand-icon">GIS</div>
     <span>SlumMap Surabaya</span>
   </a>
   <ul class="nav-links">
-    <li><a href="/">🗺️ Peta Utama</a></li>
-    <li><a href="/input.html">📝 Input Data</a></li>
-    <li><a href="/prioritas.html">🚨 Prioritas</a></li>
-    <li><a href="/register.html">➕ Wilayah Baru</a></li>
+    <li><a href="/">Peta Utama</a></li>
+    <li><a href="/input.html">Isi Survei</a></li>
+    <li><a href="/prioritas.html">Prioritas</a></li>
+    <li><a href="/register.html">Wilayah Baru</a></li>
   </ul>
 </nav>
 
@@ -64,29 +67,28 @@
     <div class="page-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;">
       <div>
         <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem;">
-          <a href="/">🗺️ Peta</a> › Riwayat Wilayah
+          <a href="/">Peta</a> / Riwayat Wilayah
         </div>
         <h1 class="page-title" id="page-title">Memuat...</h1>
         <p class="page-subtitle" id="wilayah-id-display" style="font-family:monospace;font-size:0.8125rem;"></p>
       </div>
       <div style="text-align:center;">
-        <div id="latest-score" style="padding:1rem;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;min-width:120px;">
-          <div style="color:var(--text-muted);font-size:0.75rem;">Loading...</div>
+        <div id="latest-score" style="padding:1rem;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;min-width:120px;">
+          <div style="color:var(--text-muted);font-size:0.75rem;">Memuat...</div>
         </div>
       </div>
     </div>
 
     <!-- Info Note -->
     <div class="info-note">
-      <span>ℹ️</span>
-      <span>Sistem menggunakan <strong>append-only log</strong> — setiap data baru disimpan sebagai event baru tanpa menimpa history. Anda dapat melihat kondisi wilayah di setiap titik waktu.</span>
+      <span>Riwayat ini membantu membandingkan kondisi wilayah dari waktu ke waktu berdasarkan survei yang telah masuk.</span>
     </div>
 
     <!-- Charts -->
     <div class="chart-grid">
       <div class="card">
         <div class="card-header">
-          <span class="card-title">📈 Tren Risk Score</span>
+          <span class="card-title">Tren Skor Risiko</span>
           <span style="font-size:0.75rem;color:var(--text-muted);" id="history-count"></span>
         </div>
         <div class="card-body">
@@ -97,7 +99,7 @@
       </div>
       <div class="card">
         <div class="card-header">
-          <span class="card-title">🕸️ Profil Indikator (Terbaru)</span>
+          <span class="card-title">Profil Indikator Terbaru</span>
         </div>
         <div class="card-body">
           <div class="chart-container">
@@ -110,8 +112,8 @@
     <!-- History Table -->
     <div class="card">
       <div class="card-header">
-        <span class="card-title">📋 Log Riwayat Survei</span>
-        <a href="/input.html" class="btn btn-primary btn-sm">+ Tambah Data</a>
+        <span class="card-title">Riwayat Survei</span>
+        <a href="/input.html" class="btn btn-primary btn-sm">Tambah Data</a>
       </div>
       <div class="table-container">
         <table>
@@ -125,8 +127,8 @@
               <th>Sampah</th>
               <th>Kebakaran</th>
               <th>Air Minum</th>
-              <th>Risk Score</th>
-              <th>Risk Level</th>
+              <th>Skor Risiko</th>
+              <th>Tingkat Risiko</th>
               <th>Catatan</th>
               <th>Petugas</th>
             </tr>
@@ -147,8 +149,8 @@
 
     <!-- Actions -->
     <div style="margin-top:1.5rem;display:flex;gap:1rem;">
-      <a href="/" class="btn btn-secondary">🗺️ Kembali ke Peta</a>
-      <a href="/input.html" class="btn btn-primary">📝 Tambah Data Baru</a>
+      <a href="/" class="btn btn-secondary">Kembali ke Peta</a>
+      <a href="/input.html" class="btn btn-primary">Tambah Data Baru</a>
     </div>
 
   </div>
